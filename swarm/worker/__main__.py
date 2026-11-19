@@ -1,16 +1,14 @@
 """Entry point: `python -m swarm.worker --server URL [--kinds loop,external] [--tools MODULE:ATTR ...]`.
 
 At start the worker reads `SWARM_WORKER_TOKEN` and `AI_GATEWAY_API_KEY` and removes both
-from `os.environ`, so no child (tool, Fx CLI) inherits them. The model factory is given
-at construction: `main(model_factory=...)`; the product passes `models.gateway_model`.
-A test runs its own entry script that calls `main(model_factory=fake)`. `--tools` adds
-custom tool entries (a product extension point).
+from `os.environ` so tools cannot inherit them. `main(model_factory=...)` selects a
+provider; `--tools` loads local extensions.
 """
 
 import argparse
 import asyncio
+import logging
 import os
-import sys
 from typing import cast
 from uuid import uuid4
 
@@ -31,6 +29,7 @@ async def run_worker(client: AgentClient, worker_id: str, kinds: list[AgentKind]
             claim = client.claim(worker_id, os.getpid(), kinds)
             if claim is None:
                 continue
+            logging.getLogger(__name__).info("Claimed %s attempt %d", claim.agent_id, claim.attempt)
             claim_lease = lease.Lease(client, claim)
             try:
                 claim_lease.start()
@@ -48,16 +47,17 @@ async def run_worker(client: AgentClient, worker_id: str, kinds: list[AgentKind]
 
 def main(argv: list[str] | None = None, *, model_factory: models.ModelFactory | None = None) -> int:
     """`model_factory` None: `models.gateway_model` with the key read at start."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     token = os.environ.pop("SWARM_WORKER_TOKEN", None)
     key = os.environ.pop("AI_GATEWAY_API_KEY", "")
     parser = argparse.ArgumentParser(description="Run a swarm worker")
     parser.add_argument("--server", required=True)
-    parser.add_argument("--kinds", default="loop,external")
+    parser.add_argument("--kinds", default="loop", help="comma-separated agent kinds (default: loop)")
     parser.add_argument("--tools", action="append", default=[], metavar="MODULE:ATTR")
     args = parser.parse_args(argv)
     kinds = args.kinds.split(",")
     if not token or not all(kind in ("loop", "external") for kind in kinds):
-        print("Set SWARM_WORKER_TOKEN and use --kinds loop,external or a subset", file=sys.stderr)
+        logging.error("Set SWARM_WORKER_TOKEN and use --kinds loop,external or a subset")
         return 1
     try:
         entries = tools.builtin_entries() + [entry for ref in args.tools for entry in tools.load_entries(ref)]
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None, *, model_factory: models.ModelFactory | 
     except KeyboardInterrupt:
         return 130
     except Exception as error:
-        print(f"swarm worker: {error}", file=sys.stderr)
+        logging.error("Worker stopped: %s", error)
         return 1
     return 0
 

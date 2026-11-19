@@ -5,10 +5,9 @@ protocol. The server accepts `cli_turn` only for kind `external`, as the only ca
 1. History empty: commit kind `user` (seq 0).
 2. `admit_model_call` with `spec.external.turn_tokens`; commit kind `model`: a synthetic
    `ai.assistant_message` with one tool call `cli_turn` (args `{}`).
-3. `start_call` -> `run`: `async with ai.external.Fx(cwd=sandbox, ...) as harness`;
-   `await harness.session.send(ai.user_message(spec.prompt))`; read
-   `harness.session.events()` and stop at the first `ai.events.StreamEnd`;
-   `finish_call(done)` with the final text. Any error: `finish_call(unknown)`.
+3. `start_call` -> `run`: open one Fx session in the sandbox;
+   send the prompt and read its events through the first `StreamEnd`;
+   `finish_call(done)` with the final text. A start refusal is a tool error; a cut turn becomes `unknown`.
    `use` (a turn that finished before a crash): take the stored text.
 4. Commit kind `tools`; then the final `model` step with the text, with no admission
    (`wire.StepRequest`); `finish_agent(done)`.
@@ -23,11 +22,10 @@ uses its own Fx login. An Fx process that outlives the worker: "Limits".
 
 from __future__ import annotations
 
-import os
 from contextlib import aclosing
 
 import ai
-from ai.external import Fx
+from ai.external import ExecutableMissingError, ExternalHarnessError, Fx
 from ai.types.messages import Message, ToolCallPart
 
 from swarm import wire
@@ -78,29 +76,31 @@ async def _turn_result(lease: Lease, claim: wire.Claim, seq: int) -> wire.CallRe
     lease.check()
     reply = lease.client.start_call(lease.agent_id, lease.attempt, seq, "turn", deadline=lease.deadline)
     if reply.action == "stop":
-        os._exit(3)
+        lease.stop("Fx tool call refused a second run")
     if reply.action == "use":
         return reply.outcome
     if reply.action != "run":
         return None
     lease.check()
     try:
-        text = await _run_fx(claim)
+        text, is_error, outcome = await _run_fx(claim), False, "done"
     except Exception as error:
-        lease.check()
-        lease.client.finish_call(lease.agent_id, lease.attempt, seq, "turn", "unknown", str(error), True,
-                                 deadline=lease.deadline)
-        return None
+        # A start failure proves no turn began. Later errors do not prove that (I6).
+        not_started = isinstance(error, ExecutableMissingError) or (
+            isinstance(error, ExternalHarnessError) and isinstance(error.__cause__, OSError)
+            and str(error).startswith("cannot start ")
+        )
+        text, is_error, outcome = str(error), True, "done" if not_started else "unknown"
     lease.check()
-    saved = lease.client.finish_call(lease.agent_id, lease.attempt, seq, "turn", "done", text, False,
+    saved = lease.client.finish_call(lease.agent_id, lease.attempt, seq, "turn", outcome, text, is_error,
                                      deadline=lease.deadline)
     return saved.outcome
 
 
 async def _run_fx(claim: wire.Claim) -> str:
-    async with Fx(cwd=claim.sandbox_path, instructions=claim.spec.system or None) as harness:
-        await harness.session.send(ai.user_message(claim.spec.prompt))
-        async with aclosing(harness.session.events()) as events:
+    async with Fx(cwd=claim.sandbox_path, instructions=claim.spec.system or None) as fx:
+        await fx.session.send(ai.user_message(claim.spec.prompt))
+        async with aclosing(fx.session.events()) as events:
             async for event in events:
                 if isinstance(event, ai.events.StreamEnd):
                     return event.message.text

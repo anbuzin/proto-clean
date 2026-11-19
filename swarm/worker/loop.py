@@ -9,7 +9,6 @@ system message; it does not change the committed history.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import ai
@@ -93,7 +92,7 @@ async def run_pending_step(lease: Lease, claim: wire.Claim, agent: ai.Agent, reg
         reply = lease.client.start_call(lease.agent_id, lease.attempt, step_seq, call.tool_call_id,
                                         deadline=lease.deadline)
         if reply.action == "stop":
-            os._exit(3)
+            lease.stop("tool call refused a second run")
         if reply.action in ("wait", "blocked"):
             if call.tool_name in wire.BARRIER_TOOLS:
                 return None

@@ -1,21 +1,13 @@
-"""Typed HTTP clients over `wire.ROUTES`. Standard library only; no `ai`.
+"""Typed HTTP clients; retry writes with the same body, as specified in `wire.py`.
 
-Transport timeout per request: `wait_s + 10 s` for a long poll (claim, events,
-next_launch), else `timeout_s` (default 5 s). Retry rules (the replay rules are in the
-`wire.py` header):
-- Owner and agent writes: a connection error, a timeout, or `503` is retried with the
-  same request ID and body, with backoff 0.1 s to 2 s, until `deadline`
-  (`time.monotonic()`), then `Unreachable`. Other non-2xx: `Rejected` at once.
-- `claim`: retried with the same request ID (also on 503 while its copy is made), so a
-  lost reply gives the same claim; a `stale` reply ends it (the caller makes a new ID).
-- `heartbeat`, `launch_heartbeat`, `next_launch`: one try, never retried here (the runner
-  starts a new poll after its own backoff).
-- `grant_launch`, `report_exit`: retried with the same body until `deadline`.
+Each transport try uses at most the remaining deadline. Idle polls allow time
+for the server to wait. Heartbeats and runner launch polls are single tries.
 """
 
 from __future__ import annotations
 
 import http.client
+import math
 import time
 from typing import Any, cast
 from urllib.error import HTTPError
@@ -42,6 +34,10 @@ class Rejected(Exception):
 
 class Unreachable(Exception):
     """No reply before the deadline."""
+
+
+class TaskWaitTimeout(TimeoutError):
+    """The owner did not observe a terminal task before its wait deadline."""
 
 
 def new_request_id() -> str:
@@ -171,18 +167,26 @@ class OwnerClient:
 
     def wait_for_task(self, task_id: str, timeout_s: float = 60) -> wire.TaskView:
         """Follow events until the task is not `running`; return its view."""
-        deadline = time.monotonic() + timeout_s
-        after = 0
-        while True:
-            view = cast(wire.TaskView, self._http.call("get_task", task_id=task_id, deadline=deadline))
-            if view.state != "running":
-                return view
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise Unreachable("Task is still running at the deadline")
-            query = wire.EventsQuery(task_id=task_id, after=after, wait_s=min(20, remaining / 2))
-            page = cast(wire.EventsPage, self._http.call("list_events", query, deadline=deadline))
-            after = page.next_after
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
+        deadline, after, observed = time.monotonic() + timeout_s, 0, False
+        try:
+            while time.monotonic() < deadline:
+                view = cast(wire.TaskView, self._http.call("get_task", task_id=task_id, deadline=deadline))
+                if view.state != "running":
+                    return view
+                observed = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                query = wire.EventsQuery(task_id=task_id, after=after, wait_s=min(20, remaining / 2))
+                page = cast(wire.EventsPage, self._http.call("list_events", query, deadline=deadline))
+                after = page.next_after
+        except Unreachable:
+            if not observed or time.monotonic() < deadline:
+                raise
+        raise TaskWaitTimeout(f"Timed out waiting for task {task_id}")
+
 
 
 class AgentClient:

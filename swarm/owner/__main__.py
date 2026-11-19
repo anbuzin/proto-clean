@@ -1,28 +1,24 @@
-"""Entry point: `python -m swarm.owner --state DIR <command> ...`.
-
-Reads `DIR/server.json` (URL) and `DIR/tokens.json` (owner token). Prints JSON.
-Commands:
-  submit (--spec FILE.json | --prompt TEXT [--model ID] [--tools a,b] [--workspace PATH])
-         [--request-id ID] [--wait]       a full TaskSpec only through --spec
-  show TASK_ID | history AGENT_ID | events [--task ID] [--follow]
-  resolve AGENT_ID STEP_SEQ CALL_ID --result JSON [--error] [--request-id ID]
-  cancel TASK_ID [--request-id ID] | procs TASK_ID | log PROCESS_ID [--offset N]
-  stop PROCESS_ID [--request-id ID]       every owner write takes --request-id
-"""
+"""Owner CLI: use a local state directory, or a server URL and an owner token."""
 
 import argparse
+import base64
 import json
+import logging
+import math
+import os
 import sys
 from pathlib import Path
 
 from swarm import wire
-from swarm.client import OwnerClient, Rejected, Unreachable
+from swarm.client import OwnerClient, Rejected, TaskWaitTimeout, Unreachable
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Describe the owner commands and their arguments."""
     parser = argparse.ArgumentParser(description="Control a swarm")
-    parser.add_argument("--state", type=Path, required=True)
+    endpoint = parser.add_mutually_exclusive_group(required=True)
+    endpoint.add_argument("--state", type=Path)
+    endpoint.add_argument("--url", help="server URL; requires SWARM_OWNER_TOKEN")
     commands = parser.add_subparsers(dest="command", required=True)
     submit = commands.add_parser("submit")
     source = submit.add_mutually_exclusive_group(required=True)
@@ -31,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("model", "tools", "workspace", "request-id"):
         submit.add_argument(f"--{name}")
     submit.add_argument("--wait", action="store_true")
+    submit.add_argument("--timeout", type=float, default=60, help="wait deadline in seconds")
     for command, argument in (("show", "task_id"), ("history", "agent_id"), ("cancel", "task_id"),
                               ("procs", "task_id"), ("log", "process_id"), ("stop", "process_id")):
         sub = commands.add_parser(command)
@@ -39,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--request-id")
         if command == "log":
             sub.add_argument("--offset", type=int, default=0)
+            sub.add_argument("--json", action="store_true", help="print the chunk with its offsets")
+        if command == "history":
+            sub.add_argument("--after-seq", type=int, default=-1)
+            sub.add_argument("--limit", type=int, default=200)
     events = commands.add_parser("events")
     events.add_argument("--task")
     events.add_argument("--follow", action="store_true")
@@ -66,10 +67,12 @@ def _task_spec(args: argparse.Namespace) -> wire.TaskSpec:
 def _request(client: OwnerClient, args: argparse.Namespace) -> wire.WireModel:
     match args.command:
         case "submit":
+            if args.wait and (not math.isfinite(args.timeout) or args.timeout <= 0):
+                raise ValueError("--timeout must be positive and finite")
             task = client.create_task(_task_spec(args), args.request_id)
-            return client.wait_for_task(task.task_id) if args.wait else task
+            return client.wait_for_task(task.task_id, args.timeout) if args.wait else task
         case "show": return client.get_task(args.task_id)
-        case "history": return client.history(args.agent_id)
+        case "history": return client.history(args.agent_id, args.after_seq, args.limit)
         case "events": return client.events(args.task)
         case "resolve": return client.resolve_call(args.agent_id, args.step_seq, args.call_id,
                                                     args.result, args.error, args.request_id)
@@ -77,16 +80,24 @@ def _request(client: OwnerClient, args: argparse.Namespace) -> wire.WireModel:
         case "procs": return client.processes(args.task_id)
         case "log": return client.read_log(args.process_id, args.offset)
         case "stop": return client.stop_process(args.process_id, args.request_id)
-    raise ValueError(f"Unknown command: {args.command}")
+
+
+def _connect(args: argparse.Namespace) -> OwnerClient:
+    if args.url:
+        token = os.environ.get("SWARM_OWNER_TOKEN")
+        if not token:
+            raise ValueError("Set SWARM_OWNER_TOKEN when using --url")
+        return OwnerClient(args.url, token)
+    url = json.loads((args.state / "server.json").read_text())["url"]
+    return OwnerClient(url, json.loads((args.state / "tokens.json").read_text())["owner"])
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run an owner command using the URL and token saved in the state directory."""
+    logging.basicConfig(format="%(asctime)s %(name)s %(message)s")
     args = build_parser().parse_args(argv)
     try:
-        server = json.loads((args.state / "server.json").read_text())
-        tokens = json.loads((args.state / "tokens.json").read_text())
-        client = OwnerClient(server["url"], tokens["owner"])
+        client = _connect(args)
         if args.command == "events" and args.follow:
             after = 0
             while True:
@@ -94,11 +105,15 @@ def main(argv: list[str] | None = None) -> int:
                 after = page.next_after
                 for event in page.events:
                     print(event.model_dump_json(), flush=True)
-        print(_request(client, args).model_dump_json())
+        reply = _request(client, args)
+        if isinstance(reply, wire.LogChunk) and not args.json:
+            sys.stdout.buffer.write(base64.b64decode(reply.data_b64))
+        else:
+            print(reply.model_dump_json())
     except KeyboardInterrupt:
         return 130
-    except (OSError, KeyError, ValueError, Rejected, Unreachable) as error:
-        print(f"swarm owner: {error}", file=sys.stderr)
+    except (OSError, KeyError, ValueError, Rejected, Unreachable, TaskWaitTimeout) as error:
+        logging.getLogger(__name__).error("%s", error)
         return 1
     return 0
 

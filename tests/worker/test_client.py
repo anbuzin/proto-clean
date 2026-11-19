@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
@@ -14,7 +17,7 @@ from threading import Thread
 from time import monotonic
 
 from swarm import wire
-from swarm.client import AgentClient, HttpClient, LaunchClient, OwnerClient, Rejected, RunnerClient, Unreachable
+from swarm.client import AgentClient, HttpClient, LaunchClient, OwnerClient, Rejected, RunnerClient, TaskWaitTimeout, Unreachable
 from swarm.owner.__main__ import main as owner_main
 
 Reply = tuple[int, dict] | None
@@ -142,3 +145,26 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(json.loads(output.getvalue()), reply)
             self.assertEqual(json.loads(requests[0][3])["request_id"], "exact-id")
+
+    def test_owner_cli_uses_url_credentials_and_writes_binary_log(self) -> None:
+        reply = {"data_b64": "AP8K", "offset": 2, "next_offset": 5, "eof": True}
+        with server_with((200, reply), (200, {"messages": [], "next_seq": 8})) as (url, requests):
+            env = os.environ | {"SWARM_OWNER_TOKEN": "stub-owner"}
+            cli = [sys.executable, "-m", "swarm.owner", "--url", url]
+            log = subprocess.run([*cli, "log", "proc", "--offset", "2"], env=env, capture_output=True, timeout=5)
+            self.assertEqual(log.returncode, 0, log.stderr)
+            self.assertEqual(log.stdout, b"\x00\xff\n")
+            page = subprocess.run([*cli, "history", "ag", "--after-seq", "7", "--limit", "3"],
+                                  env=env, capture_output=True, timeout=5)
+            self.assertEqual(page.returncode, 0, page.stderr)
+            self.assertEqual(json.loads(page.stdout)["next_seq"], 8)
+            self.assertEqual(requests[0][2], "Bearer stub-owner")
+            self.assertIn("after_seq=7&limit=3", requests[1][1])
+
+    def test_wait_timeout_names_the_submitted_task(self) -> None:
+        running = {"id": "task", "root_agent_id": "ag", "state": "running", "budget_tokens": 10,
+                   "used_tokens": 0, "agents": []}
+        responses = [(200, running), (200, {"events": [], "next_after": 0})] * 1000
+        with server_with(*responses) as (url, _):
+            with self.assertRaisesRegex(TaskWaitTimeout, "task task"):
+                OwnerClient(url, "stub-owner").wait_for_task("task", timeout_s=0.05)

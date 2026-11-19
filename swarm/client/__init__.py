@@ -5,6 +5,6 @@
 Standard library only (`urllib.request`); it must not import `ai`.
 """
 
-from .api import AgentClient, HttpClient, LaunchClient, OwnerClient, Rejected, RunnerClient, Unreachable
+from .api import AgentClient, HttpClient, LaunchClient, OwnerClient, Rejected, RunnerClient, TaskWaitTimeout, Unreachable
 
-__all__ = ["AgentClient", "HttpClient", "LaunchClient", "OwnerClient", "Rejected", "RunnerClient", "Unreachable"]
+__all__ = ["AgentClient", "HttpClient", "LaunchClient", "OwnerClient", "Rejected", "RunnerClient", "TaskWaitTimeout", "Unreachable"]

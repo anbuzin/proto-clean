@@ -28,14 +28,14 @@ class ServerHarness(unittest.TestCase):
         self.addCleanup(self.stop_server)
         self.start_server()
 
-    def start_server(self, *, policy=None, cli=False, cli_port=None):
+    def start_server(self, *, policy=None, cli=False, cli_port=None, reaper_interval=0.05):
         # The public configuration makes expiry tests fast without product test hooks.
         code = (
             "from pathlib import Path; from swarm.server.config import ServerConfig; "
             "from swarm.server.app import Server; import sys; "
             "c=ServerConfig(state_dir=Path(sys.argv[1]), port=0 if sys.argv[2]=='first' else None, "
             "policy_path=Path(sys.argv[3]) if sys.argv[3] else None, "
-            "lease_ttl_s=1.5, reaper_interval_s=0.05, backoff_base_s=0.05, "
+            "lease_ttl_s=1.5, reaper_interval_s=float(sys.argv[4]), backoff_base_s=0.05, "
             "backoff_max_s=0.1, grant_deadline_s=0.5, shim_silence_s=5); "
             "from threading import Event; s=Server(c); s.start(); Event().wait()"
         )
@@ -46,7 +46,7 @@ class ServerHarness(unittest.TestCase):
                 command += ["--port", str(cli_port)]
         else:
             command = [sys.executable, "-c", code, str(self.state),
-                       "first" if first else "restart", str(policy or "")]
+                       "first" if first else "restart", str(policy or ""), str(reaper_interval)]
         self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=self.log)
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
@@ -72,9 +72,9 @@ class ServerHarness(unittest.TestCase):
             self.process.wait(timeout=5)
             self.process = None
 
-    def request(self, name, body=None, *, token=None, expected=200, **path):
+    def request(self, name, body=None, *, token=None, expected=200, validate=True, **path):
         route = wire.ROUTE[name]
-        if body is not None:
+        if body is not None and validate:
             body = route.request.model_validate(body).model_dump(mode="json")
         data = None if route.method == "GET" else json.dumps(body).encode()
         auth = token if token is not None else self.tokens.get(route.auth)

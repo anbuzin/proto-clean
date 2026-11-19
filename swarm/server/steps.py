@@ -117,10 +117,9 @@ def finish_agent(deps: Deps, request: wire.FinishRequest, agent_id: str) -> wire
         elif any(call.state == "unknown" or (call.state == "running" and call.safety == "unsafe")
                  for call in pending):
             raise ApiError("conflict", "agent has an unresolved unsafe call")
-        reason = None if request.status == "done" else str(request.result or "worker")
+        reason = None if request.status == "done" else "worker"
         tasks.end_agent(tx, agent_id, request.status, result=request.result, reason=reason)
         return key.save(tx, deps, wire.AgentStateReply(state=request.status), terminal=True)
-
 
 
 def _last(tx: Tx, agent_id: str) -> dict | None:

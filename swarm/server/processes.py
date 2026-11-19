@@ -108,7 +108,7 @@ def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: 
                  call_id: str) -> wire.CallStartReply:
     """Read a same-task process log outside the transaction and complete after a second fence.
 
-    The first transaction snapshots the process state and final log size. A missing or
+    The first transaction reads the process state and final log size. A missing or
     inaccessible process completes the call with an error.
     """
     with deps.store.write() as tx:
@@ -120,7 +120,7 @@ def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: 
         if row is None:
             reply = _error(tx, call, "process not found or inaccessible")
             return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
-    chunk = _read_snapshot(row, wire.LogQuery(offset=args.offset, max_bytes=args.max_bytes))
+    chunk = _read_log_bytes(row, wire.LogQuery(offset=args.offset, max_bytes=args.max_bytes))
     with deps.store.write() as tx:
         agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
         if reply is not None:
@@ -159,7 +159,7 @@ def on_process_end(tx: Tx, process_id: str) -> None:
 
     Unknown or externally stopped commands are cuts: local cuts are interrupted;
     external cuts become unknown. A timeout or agent stop is a normal result.
-    The output tail comes only from the stored launch receipt.
+    The output tail comes only from the stored exit report.
     """
     row = tx.require("SELECT * FROM processes WHERE id=?", process_id)
     if row["lifetime"] != "command":
@@ -168,14 +168,16 @@ def on_process_end(tx: Tx, process_id: str) -> None:
     if call is None:
         return
     launch = tx.one("SELECT exit_json FROM launches WHERE id=?", row["current_launch"])
-    receipt = json.loads(launch["exit_json"]) if launch and launch["exit_json"] else {}
-    cut = row["outcome"] == "unknown" or (row["outcome"] == "signaled" and row["stop_reason"] in wire.CUT_STOP_REASONS)
+    report = json.loads(launch["exit_json"]) if launch and launch["exit_json"] else {}
+    cut = row["outcome"] == "unknown" or (
+        row["granted_at"] is not None and row["stop_reason"] in wire.CUT_STOP_REASONS
+    )
     outcome = "interrupted" if cut and row["effect_class"] == "local" else row["outcome"]
     result = wire.CommandResult(process_id=process_id, outcome=outcome, exit_code=row["exit_code"],
                                 signal=row["signal"], stop_reason=row["stop_reason"], log_bytes=row["log_bytes"],
-                                truncated_bytes=row["truncated_bytes"], output_tail=receipt.get("output_tail", ""))
+                                truncated_bytes=row["truncated_bytes"], output_tail=report.get("output_tail", ""))
     calls.fill_call(tx, call["agent_id"], call["step_seq"], call["call_id"],
-                    wire.CallResult(result=result.model_dump(mode="json")),
+                    wire.CallResult(result=result.model_dump(mode="json"), is_error=row["outcome"] == "not_started"),
                     unknown=cut and row["effect_class"] == "external")
 
 
@@ -187,7 +189,7 @@ def list_processes(deps: Deps, request: None, task_id: str) -> wire.ProcessList:
             "SELECT * FROM processes WHERE task_id=? ORDER BY created_at, id", task_id)])
 
 
-def _read_snapshot(row: dict, request: wire.LogQuery) -> wire.LogChunk:
+def _read_log_bytes(row: dict, request: wire.LogQuery) -> wire.LogChunk:
     offset = request.offset
     terminal = row["state"] in ("ended", "failed")
     granted = row["granted_at"] is not None
@@ -214,7 +216,7 @@ def read_log(deps: Deps, request: wire.LogQuery, process_id: str) -> wire.LogChu
     """
     with deps.store.read() as tx:
         row = tx.require("SELECT * FROM processes WHERE id=?", process_id)
-    return _read_snapshot(row, request)
+    return _read_log_bytes(row, request)
 
 
 def stop_process(deps: Deps, request: wire.OwnerWrite, process_id: str) -> wire.ProcessView:

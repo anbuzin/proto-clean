@@ -118,8 +118,10 @@ def settle(tx: Tx, agent_id: str) -> str:
     """State of an agent with no lease, by precedence: terminal stays; a call of the
     pending step `unknown` -> `blocked`; one `waiting` -> `waiting`; else `ready`.
     `planned` calls after a barrier do not count: the next attempt starts them."""
-    agent = tx.require("SELECT * FROM agents WHERE id=?", agent_id)
-    if agent["state"] in wire.TERMINAL_AGENT_STATES or agent["lease_until"] is not None:
+    agent = tx.require("SELECT a.*, t.state AS task_state FROM agents a JOIN tasks t ON t.id=a.task_id WHERE a.id=?",
+                       agent_id)
+    if (agent["state"] in wire.TERMINAL_AGENT_STATES or agent["lease_until"] is not None
+            or agent["task_state"] != "running"):
         return agent["state"]
     states = {call.state for call in calls.pending(tx, agent_id)}
     state = "blocked" if "unknown" in states else "waiting" if "waiting" in states else "ready"

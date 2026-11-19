@@ -43,3 +43,32 @@ class LeaseTest(unittest.TestCase):
                 child = subprocess.run([sys.executable, "-c", CHILD, reason], capture_output=True, text=True, timeout=5)
                 self.assertEqual(child.returncode, 3, child.stderr)
                 self.assertEqual(child.stdout, "first heartbeat succeeded\n")
+
+    def test_i15_late_ack_cannot_extend_the_previous_deadline(self) -> None:
+        script = """
+from swarm import wire
+from swarm.worker import lease as leases
+
+clock = [0.0]
+leases.monotonic = lambda: clock[0]
+
+class Client:
+    def heartbeat(self, agent_id, attempt, timeout_s):
+        if clock[0] == 0.5:
+            clock[0] = 1.01  # After the old deadline, but before a new one could end.
+        return wire.HeartbeatReply(lease_until=0)
+
+claim = wire.Claim(agent_id='agent', task_id='task', attempt=1, lease_ttl_s=1,
+                   spec=wire.TaskSpec(prompt='test'), history=[], next_seq=0, pending_calls=[],
+                   memory={}, sandbox_path='/sandbox')
+lease = leases.Lease(Client(), claim)
+lease.start()
+lease.pause()
+clock[0] = 0.5
+lease.resume()
+lease.close()
+raise AssertionError('late reply extended the old deadline')
+"""
+        child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5)
+        self.assertEqual(child.returncode, 3, child.stderr)
+        self.assertIn("local deadline passed", child.stderr)

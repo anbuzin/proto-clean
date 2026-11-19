@@ -68,8 +68,12 @@ class TaskTest(SwarmTest):
         self.assertEqual([message.seq for message in messages], [0, 1])
         self.assertEqual([c.call_id for c in retained.agents[0].calls], ["gate"])
         self.start_supervisor(workers=2)
-        second = self.running_call(task, "gate", attempt=2).attempts[1]
-        self.assertNotIn(second.pid, workers)
+        # A dead idle worker can still have an outstanding claim, but it cannot activate it.
+        resumed = self.until(lambda: self.root_agent(task), lambda a: any(
+            c.call_id == "gate" and c.state == "running" and c.attempt == a.attempt > 1 for c in a.calls
+        ), timeout=45)
+        self.assertNotIn(resumed.attempts[-1].pid, workers)
+        self.assertEqual((resumed.strikes, resumed.calls[0].runs), (1, 2))
         release.touch()
         self.finished(task)
 

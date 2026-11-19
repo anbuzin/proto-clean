@@ -28,10 +28,10 @@ class ProcessTest(SwarmTest):
         python = ["python3", "-c", PAYLOAD, str(release)]
         return ["sh", "-c", 'exec "$@"', "command", *python] if external else python
 
-    def process(self, task: str, state: wire.ProcessState) -> wire.ProcessView:
+    def process(self, task: str, state: wire.ProcessState, *, timeout: float = 35) -> wire.ProcessView:
         """Wait for the task's sole process to reach the given state."""
         records = self.until(lambda: self.owner.processes(task).processes,
-                             lambda rows: len(rows) == 1 and rows[0].state == state)
+                             lambda rows: len(rows) == 1 and rows[0].state == state, timeout=timeout)
         return records[0]
 
     def test_t11_command_yields_and_returns_exit_and_output(self) -> None:
@@ -133,3 +133,35 @@ class ProcessTest(SwarmTest):
         recovered = self.finished(tasks["receipt"])
         result = wire.CommandResult.model_validate(recovered.calls[0].outcome.result)
         self.assertEqual((result.outcome, result.exit_code, result.output_tail), ("exited", 7, "first\nsecond\n"))
+
+    def test_t15_restart_fences_attempt_and_shim_reports_to_same_url(self) -> None:
+        payload_release = self.state / "end-during-outage"
+        worker_release = self.state / "end-worker-tool"
+        self.set_scripts({"restart": [[
+            call("process_start", "start", argv=self.command(payload_release), lifetime="task"),
+            call("wait_for_release", "gate", path=str(worker_release)),
+        ], "done"]})
+        server = self.start_server()
+        self.start_supervisor()
+        task = self.submit("restart", "process_start", "wait_for_release")
+        attempt = self.running_call(task, "gate").attempts[0]
+        process = self.process(task, "running")
+        shim, payload = self.launch_pids(task, process.id)
+        url, owner = self.url, self.owner
+        server.kill()
+        server.wait(timeout=5)
+        payload_release.touch()
+        self.until(lambda: payload not in matching_pids(parent=shim), timeout=5)
+        server = self.start_server(restart=True)
+        self.assertEqual(self.url, url)
+        self.assertEqual(owner.health().pid, server.pid)
+        agent = self.root_agent(task)
+        ended = agent.attempts[0]
+        self.assertEqual((ended.attempt, ended.pid, ended.end_reason, agent.strikes),
+                         (1, attempt.pid, "server_restart", 0))
+        # A live exit report must arrive before the reaper can import a receipt (10 s).
+        reported = self.process(task, "ended", timeout=7)
+        self.assertEqual((reported.id, reported.outcome, reported.exit_code), (process.id, "exited", 7))
+        self.running_call(task, "gate", attempt=2)
+        worker_release.touch()
+        self.assertEqual(self.finished(task).strikes, 0)

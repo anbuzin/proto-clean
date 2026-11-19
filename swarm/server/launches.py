@@ -107,22 +107,7 @@ def _retry_or_end(tx: Tx, deps: Deps, row: dict) -> None:
     tx.event(row["task_id"], row["agent_id"], "process_" + state, process_id=row["id"])
 
 
-def _valid_exit(request: wire.ExitReport) -> bool:
-    if request.log_bytes < 0 or request.truncated_bytes < 0:
-        return False
-    if request.started:
-        if (request.exit_code is None) == (request.signal is None):
-            return False
-        if request.exit_code is not None and request.exit_code < 0:
-            return False
-        if request.signal is not None and request.signal <= 0:
-            return False
-    return True
-
-
 def _apply_exit(tx: Tx, deps: Deps, launch: dict, request: wire.ExitReport) -> wire.Ack:
-    if not _valid_exit(request):
-        raise ApiError("invalid", "invalid exit report")
     digest = _body(request)
     if launch["state"] == "ended":
         if launch["exit_hash"] == digest:
@@ -182,7 +167,7 @@ def expire_launches(deps: Deps) -> None:
         receipt = None
         try:
             receipt = wire.ExitReport.model_validate_json(log.with_name("exit.json").read_text())
-            if not receipt.started or not _valid_exit(receipt):
+            if not receipt.started:
                 receipt = None
         except (OSError, ValueError):
             pass

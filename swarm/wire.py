@@ -25,9 +25,9 @@ Retry and replay (I3), per route group:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 JSON = Any
 
@@ -435,9 +435,18 @@ class ExitReport(WireModel):
     started: bool = True        # False: the shim was denied and killed the held child (`not_started`)
     exit_code: int | None = None
     signal: int | None = None
-    log_bytes: int = 0
-    truncated_bytes: int = 0
+    log_bytes: int = Field(default=0, ge=0)
+    truncated_bytes: int = Field(default=0, ge=0)
     output_tail: str = ""       # last 4 KiB of the log, decoded UTF-8 with replacement
+
+    @model_validator(mode="after")
+    def check_status(self) -> Self:
+        """A started payload has exactly one valid exit status (I13)."""
+        if self.started and ((self.exit_code is None) == (self.signal is None)
+                             or (self.exit_code is not None and self.exit_code < 0)
+                             or (self.signal is not None and self.signal <= 0)):
+            raise ValueError("expected a nonnegative exit code or a positive signal")
+        return self
 
 
 # --- Server tool arguments (the server validates them; the worker mirrors them as stubs) -

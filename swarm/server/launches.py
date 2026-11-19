@@ -9,8 +9,8 @@ from pathlib import Path
 
 from swarm import wire
 
-from .errors import ApiError
 from .deps import Deps
+from .errors import ApiError
 from .processes import on_process_end
 from .store import Tx, json_text, new_id
 

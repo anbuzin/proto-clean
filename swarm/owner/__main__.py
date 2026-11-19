@@ -95,7 +95,7 @@ def _connect(args: argparse.Namespace) -> OwnerClient:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run an owner command using the URL and token saved in the state directory."""
+    """Run an owner command against a local or remote server."""
     logging.basicConfig(format="%(asctime)s %(name)s %(message)s")
     args = build_parser().parse_args(argv)
     try:

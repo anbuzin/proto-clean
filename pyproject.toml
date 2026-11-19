@@ -1,0 +1,9 @@
+[project]
+name = "swarm-clean"
+version = "0.1.0"
+description = "Clean prototype of a client-server agent swarm: a server with no AI owns all state; agents are disposable clients."
+requires-python = ">=3.13"
+dependencies = ["ai==0.10.0"]
+
+[tool.uv]
+package = false

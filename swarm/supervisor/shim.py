@@ -202,7 +202,7 @@ def run_shim(order: wire.LaunchOrder, client: LaunchClient, process_dir: str) ->
     with open(os.devnull, "rb") as null:
         os.dup2(null.fileno(), 0)
     for directory in order.private_dirs:
-        Path(directory).mkdir(mode=0o700, exist_ok=True)
+        Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
 
     payload = _Payload(order)
     try:

@@ -1,141 +1,234 @@
-"""Background processes: records, launches, grant, shim heartbeat, exit, logs, process tools.
+"""Process records, server tools and exact-byte log reads.
 
-The server owns the record and never starts a process. Transitions: the launch table in
-ARCHITECTURE.md section 7. Only `processes.current_launch` can change a process row; a
-report for any other launch gets a reply but changes nothing. Files:
-`processes/<id>/private/{home,tmp}` (payload HOME and TMPDIR), `processes/<id>/work/`
-(own clone for `process_start`), `processes/<id>/log`, `processes/<id>/exit.json`.
+Launch handshakes and recovery live in ``_launches``. The server never starts a
+payload; it only records the order and accepts facts from the granted shim.
 """
-
 from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
 
 from swarm import wire
 
+from . import calls, sandboxes
 from .http import Deps
-from .store import Tx
-
-# --- Server tools ----------------------------------------------------------------------
-
-
-def run_command(tx: Tx, deps: Deps, agent: dict, call: wire.CallView, args: wire.RunCommandArgs) -> wire.CallStartReply:
-    """One phase. Policy refused: `use` with an error. Else process `requested`
-    (lifetime `command`, cwd = this attempt's copy, the checked argv and the decision env,
-    `timeout_s`); call `waiting` with `process_id`; reply `wait` (a barrier)."""
-    raise NotImplementedError
+from .policy import Decision
+from .store import Tx, fingerprint, json_text, new_id
 
 
-def process_start(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int, call_id: str,
-                  args: wire.ProcessStartArgs) -> wire.CallStartReply:
-    """Two phases (calls.start_call). 1: policy (refused: commit `use` with an error).
-    2: clone this attempt's copy to a provisional path of its own,
-    `processes/<new id>/work/` with a new random id per try, so a retry never removes
-    the work directory of a winner. 3: if still current and `planned`: process
-    `requested` with that id (lifetime from args, cwd = work), call `done` with
-    `{process_id}`; a clone error: call `done` with an error result, reply `use`. A loser
-    leaves its directory unused."""
-    raise NotImplementedError
+def _view(row: dict) -> wire.ProcessView:
+    fields = {key: row[key] for key in wire.ProcessView.model_fields if key in row}
+    return wire.ProcessView(**fields, argv=json.loads(row["argv_json"]))
 
 
-def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int, call_id: str,
-                 args: wire.ProcessReadArgs) -> wire.CallStartReply:
-    """Two phases. 1: fence, same task, snapshot (state, final `log_bytes`). 2: `read_log`.
-    3: fence again; call `done` with the `LogChunk` dict."""
-    raise NotImplementedError
+def _record(tx: Tx, deps: Deps, agent: dict, call: wire.CallView, process_id: str,
+            argv: list[str], decision: Decision, cwd: str, lifetime: str, timeout: float | None) -> None:
+    log = deps.config.processes_dir / process_id / "log"
+    tx.run("""INSERT INTO processes
+        (id, task_id, agent_id, call_ref, argv_json, env_json, cwd, effect_class,
+         lifetime, timeout_s, desired, state, log_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'requested', ?, ?)""",
+        process_id, agent["task_id"], agent["id"],
+        f"{call.agent_id}:{call.step_seq}:{call.call_id}", json_text(argv),
+        json_text(decision.env), cwd, decision.effect_class, lifetime, timeout, str(log), tx.now)
+    tx.event(agent["task_id"], agent["id"], "process_requested", process_id=process_id)
 
 
-def process_stop(tx: Tx, deps: Deps, agent: dict, call: wire.CallView, args: wire.ProcessStopArgs) -> wire.CallStartReply:
-    """One phase. The starting agent or an ancestor: `desired=stopped` ('agent'); `done`."""
-    raise NotImplementedError
+def _attempt_path(tx: Tx, agent: dict) -> str:
+    return tx.require("SELECT sandbox_path FROM attempts WHERE agent_id=? AND attempt=?",
+                      agent["id"], agent["attempt"])["sandbox_path"]
 
 
-# --- Runner and shim routes ------------------------------------------------------------
+def _decision(deps: Deps, process_id: str, argv: list[str]) -> Decision:
+    return deps.policy.check(argv, deps.config.processes_dir / process_id / "private")
 
 
-def next_launch(deps: Deps, request: wire.NextLaunchRequest) -> wire.LaunchOrder | None:
-    """I12. Long poll. One transaction: oldest `requested` process with `desired=running`
-    -> `launching`, tries+1, new launch `issued` (secret hash, `grant_deadline = mono +
-    grant_deadline_s`), `current_launch`. The plaintext secret is only in this reply."""
-    raise NotImplementedError
+def _error(tx: Tx, call: wire.CallView, message: str) -> wire.CallStartReply:
+    return calls.complete(tx, call, wire.CallResult(result=message, is_error=True))
 
 
-def authenticate_launch(tx: Tx, launch_id: str, secret: str | None) -> dict:
-    """Inside the caller's write transaction: secret hash matches, else `unauthorized`."""
-    raise NotImplementedError
+def run_command(tx: Tx, deps: Deps, agent: dict, call: wire.CallView,
+                args: wire.RunCommandArgs) -> wire.CallStartReply:
+    """Request an approved command and wait for its process, or complete with an error.
+
+    This one-phase barrier uses the current attempt's sandbox and the policy environment.
+    """
+    process_id = new_id("proc")
+    decision = _decision(deps, process_id, args.argv)
+    if not decision.allowed:
+        return _error(tx, call, decision.reason)
+    _record(tx, deps, agent, call, process_id, args.argv, decision,
+            _attempt_path(tx, agent), "command", args.timeout_s)
+    return calls.wait(tx, call, process_id=process_id)
 
 
-def grant_launch(deps: Deps, request: wire.GrantRequest, launch_id: str) -> wire.GrantReply:
-    """`issued`, current, before deadline, `desired=running`: `granted`, pid, grant hash;
-    process `running`, `granted_at`, heartbeat clock = now. Same body for a granted
-    launch: `granted` again. Anything else: `granted=False`."""
-    raise NotImplementedError
+def process_start(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int,
+                  call_id: str, args: wire.ProcessStartArgs) -> wire.CallStartReply:
+    """Clone the attempt and request a background process in two phases.
+
+    Policy refusal or clone failure completes the call with an error. Each try uses a
+    provisional process ID; the second fence and replay check choose one winner.
+    """
+    with deps.store.write() as tx:
+        agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
+        if reply is not None:
+            return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+        process_id = new_id("proc")
+        decision = _decision(deps, process_id, args.argv)
+        if not decision.allowed:
+            return calls.save_start(tx, deps, request, agent_id, step_seq, call_id,
+                                    _error(tx, call, decision.reason))
+        source = Path(_attempt_path(tx, agent))
+    work = deps.config.processes_dir / process_id / "work"
+    error = None
+    try:
+        sandboxes.materialize(source, work)
+    except OSError as exc:
+        error = str(exc)
+    with deps.store.write() as tx:
+        agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
+        if reply is not None:
+            return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+        if error is not None:
+            reply = _error(tx, call, error)
+        else:
+            _record(tx, deps, agent, call, process_id, args.argv, decision, str(work), args.lifetime, None)
+            reply = calls.complete(tx, call, wire.CallResult(result={"process_id": process_id}))
+        return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
 
 
-def launch_heartbeat(deps: Deps, request: wire.LaunchHeartbeat, launch_id: str) -> wire.LaunchHeartbeatReply:
-    """Granted and current: store the clock, `log_bytes`, `truncated_bytes`. `stop` if
-    `desired=stopped`, or a `command` process is past `granted_at + timeout_s` (then
-    `desired=stopped` 'timeout' in this transaction). Not current or not granted: `stop`."""
-    raise NotImplementedError
+def _same_task(tx: Tx, agent: dict, process_id: str) -> dict | None:
+    return tx.one("SELECT * FROM processes WHERE id=? AND task_id=?", process_id, agent["task_id"])
 
 
-def report_exit(deps: Deps, request: wire.ExitReport, launch_id: str) -> wire.Ack:
-    """I13. `started=False` for the current `issued` launch (a denial): one transaction,
-    as a revoke: launch `ended`; process `ended` `not_started` if desired is `stopped`,
-    else `requested` again, or `failed` `not_started` at `launch_tries`;
-    `on_process_end` on a terminal result. A late denial for a launch that is no longer
-    current: launch `ended`, process unchanged.
-    `started=True` (granted launch): launch `ended` with `exit_json`, `exit_hash`;
-    current: process `ended` (`exited`, `signaled`), log facts, `on_process_end`.
-    Duplicate same body: Ack. Ended with another body: `conflict`."""
-    raise NotImplementedError
+def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int,
+                 call_id: str, args: wire.ProcessReadArgs) -> wire.CallStartReply:
+    """Read a same-task process log outside the transaction and complete after a second fence.
+
+    The first transaction snapshots the process state and final log size. A missing or
+    inaccessible process completes the call with an error.
+    """
+    with deps.store.write() as tx:
+        agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
+        if reply is not None:
+            return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+        row = _same_task(tx, agent, args.process_id)
+        if row is None:
+            reply = _error(tx, call, "process not found or inaccessible")
+            return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+    chunk = _read_snapshot(row, wire.LogQuery(offset=args.offset, max_bytes=args.max_bytes))
+    with deps.store.write() as tx:
+        agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
+        if reply is not None:
+            return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+        if _same_task(tx, agent, args.process_id) is None:
+            reply = _error(tx, call, "process not found or inaccessible")
+        else:
+            reply = calls.complete(tx, call, wire.CallResult(result=chunk.model_dump(mode="json")))
+        return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+
+
+def _stop(tx: Tx, row: dict, reason: str) -> None:
+    if row["desired"] == "running" and row["state"] not in ("ended", "failed"):
+        tx.run("UPDATE processes SET desired='stopped', stop_reason=? WHERE id=?", reason, row["id"])
+        tx.event(row["task_id"], row["agent_id"], "process_stop_requested", process_id=row["id"], reason=reason)
+
+
+def process_stop(tx: Tx, deps: Deps, agent: dict, call: wire.CallView,
+                 args: wire.ProcessStopArgs) -> wire.CallStartReply:
+    """Stop a process when the caller is its starting agent or an ancestor."""
+    row = _same_task(tx, agent, args.process_id)
+    if row is None:
+        return _error(tx, call, "process not found or inaccessible")
+    ancestor = tx.one("""WITH RECURSIVE ancestors(id, parent_id) AS (
+        SELECT id, parent_id FROM agents WHERE id=?
+        UNION ALL SELECT a.id, a.parent_id FROM agents a JOIN ancestors p ON a.id=p.parent_id)
+        SELECT id FROM ancestors WHERE id=?""", row["agent_id"], agent["id"])
+    if ancestor is None:
+        return _error(tx, call, "only the starting agent or an ancestor may stop this process")
+    _stop(tx, row, "agent")
+    return calls.complete(tx, call, wire.CallResult(result={"process_id": row["id"]}))
 
 
 def on_process_end(tx: Tx, process_id: str) -> None:
-    """Every terminal path calls this. Lifetime `command`: fill the call with a
-    `CommandResult`; `output_tail` from the launch's `exit_json`, or "" when there is no
-    receipt (no file read in this transaction). A cut (I16: outcome `unknown`, or `signaled` with a stop reason in
-    `wire.CUT_STOP_REASONS`): `local` -> outcome `interrupted`; `external` -> call
-    `unknown`. A `timeout` or `agent` stop is a normal result."""
-    raise NotImplementedError
+    """Fill a command's waiting call when its process becomes terminal.
 
-
-# --- Reaper and recovery ---------------------------------------------------------------
-
-
-def expire_launches(deps: Deps) -> None:
-    """`issued` past deadline -> `revoked`; same transaction: process `requested` again,
-    or at `launch_tries` `failed` (`not_started`) and `on_process_end`.
-    `granted` with no heartbeat for `shim_silence_s`: if `exit.json` exists, apply it as
-    a report; else launch `ended`, process `ended` `unknown` with the current file size
-    as final `log_bytes`, `on_process_end`. Never relaunched (I12)."""
-    raise NotImplementedError
-
-
-def enforce_lifetimes(deps: Deps) -> None:
-    """`requested` or `launching` with `desired=stopped` -> `ended` `not_started`
-    (launch revoked), `on_process_end`."""
-    raise NotImplementedError
-
-
-def recover_after_restart(deps: Deps) -> None:
-    """Startup: each `issued` launch -> as a deadline expiry; each `granted` launch:
-    heartbeat clock = now (the shim gets `shim_silence_s` to reach the new server)."""
-    raise NotImplementedError
-
-
-# --- Owner routes ----------------------------------------------------------------------
+    Unknown or externally stopped commands are cuts: local cuts are interrupted;
+    external cuts become unknown. A timeout or agent stop is a normal result.
+    The output tail comes only from the stored launch receipt.
+    """
+    row = tx.require("SELECT * FROM processes WHERE id=?", process_id)
+    if row["lifetime"] != "command":
+        return
+    call = tx.one("SELECT * FROM calls WHERE process_id=? AND state='waiting'", process_id)
+    if call is None:
+        return
+    launch = tx.one("SELECT exit_json FROM launches WHERE id=?", row["current_launch"])
+    receipt = json.loads(launch["exit_json"]) if launch and launch["exit_json"] else {}
+    cut = row["outcome"] == "unknown" or (row["outcome"] == "signaled" and row["stop_reason"] in wire.CUT_STOP_REASONS)
+    outcome = "interrupted" if cut and row["effect_class"] == "local" else row["outcome"]
+    result = wire.CommandResult(process_id=process_id, outcome=outcome, exit_code=row["exit_code"],
+                                signal=row["signal"], stop_reason=row["stop_reason"], log_bytes=row["log_bytes"],
+                                truncated_bytes=row["truncated_bytes"], output_tail=receipt.get("output_tail", ""))
+    calls.fill_call(tx, call["agent_id"], call["step_seq"], call["call_id"],
+                    wire.CallResult(result=result.model_dump(mode="json")),
+                    unknown=cut and row["effect_class"] == "external")
 
 
 def list_processes(deps: Deps, request: None, task_id: str) -> wire.ProcessList:
-    raise NotImplementedError
+    """List a task's processes in creation order."""
+    with deps.store.read() as tx:
+        tx.require("SELECT id FROM tasks WHERE id=?", task_id)
+        return wire.ProcessList(processes=[_view(row) for row in tx.all(
+            "SELECT * FROM processes WHERE task_id=? ORDER BY created_at, id", task_id)])
+
+
+def _read_snapshot(row: dict, request: wire.LogQuery) -> wire.LogChunk:
+    offset = request.offset
+    terminal = row["state"] in ("ended", "failed")
+    granted = row["granted_at"] is not None
+    data = b""
+    gap = False
+    if granted:
+        try:
+            with open(row["log_path"], "rb") as log:
+                log.seek(offset)
+                limit = min(request.max_bytes, max(0, row["log_bytes"] - offset)) if terminal else request.max_bytes
+                data = log.read(limit)
+        except FileNotFoundError:
+            gap = True
+    end = offset + len(data)
+    return wire.LogChunk(data_b64=base64.b64encode(data).decode("ascii"), offset=offset,
+                         next_offset=end, eof=terminal and (not granted or end == row["log_bytes"]), gap=gap)
 
 
 def read_log(deps: Deps, request: wire.LogQuery, process_id: str) -> wire.LogChunk:
-    """Exact bytes from `offset`, base64, no transaction open during the read. Not granted
-    yet: empty, eof False. Ended `not_started`: empty, eof True. `eof`: ended and
-    `next_offset == log_bytes`. `gap`: the file is missing for a granted process."""
-    raise NotImplementedError
+    """Read exact log bytes outside a transaction.
+
+    An ungranted process has no bytes; not-started is at EOF. A missing log after
+    grant is a gap. An ended process reaches EOF at its final log size.
+    """
+    with deps.store.read() as tx:
+        row = tx.require("SELECT * FROM processes WHERE id=?", process_id)
+    return _read_snapshot(row, request)
 
 
 def stop_process(deps: Deps, request: wire.OwnerWrite, process_id: str) -> wire.ProcessView:
-    """`desired=stopped` ('owner')."""
-    raise NotImplementedError
+    """Request an owner stop and store the reply for replay."""
+    fp = fingerprint("stop_process", {"process_id": process_id}, request.model_dump(mode="json"))
+    with deps.store.write() as tx:
+        stored = deps.store.stored_reply(tx, "owner", request.request_id, fp)
+        if stored is not None:
+            return wire.ProcessView.model_validate(stored.reply)
+        row = tx.require("SELECT * FROM processes WHERE id=?", process_id)
+        _stop(tx, row, "owner")
+        reply = _view(tx.require("SELECT * FROM processes WHERE id=?", process_id))
+        deps.store.save_reply(tx, "owner", request.request_id, fp, reply.model_dump(mode="json"))
+        return reply
+
+
+# Public route and reaper functions are kept here for the HTTP and app modules.
+from ._launches import (authenticate_launch, enforce_lifetimes, expire_launches,
+                        grant_launch, launch_heartbeat, next_launch,
+                        recover_after_restart, report_exit)

@@ -4,7 +4,7 @@ import signal
 from pathlib import Path
 
 from tests.fakes import call
-from tests.helpers import SwarmTest, send
+from tests.helpers import SwarmTest, matching_pids, send
 
 
 class TaskTest(SwarmTest):
@@ -46,3 +46,28 @@ class TaskTest(SwarmTest):
         self.assertEqual([(c.call_id, c.runs, c.state) for c in agent.calls], [("gate", 2, "done")])
         history = self.owner.history(agent.id).messages
         self.assertEqual([(m.seq, m.attempt) for m in history], [(0, 1), (1, 1), (2, 2), (3, 2)])
+
+    def test_t3_new_supervisor_finishes_after_pool_loss(self) -> None:
+        task, release = self.interrupted_task()
+        supervisor = self.start_supervisor(workers=2)
+        first = self.running_call(task, "gate")
+        workers = self.until(lambda: matching_pids(str(self.script), parent=supervisor.pid),
+                             lambda pids: len(pids) == 2)
+        self.assertIn(first.attempts[0].pid, workers)
+        for pid in workers:
+            self.addCleanup(send, pid, signal.SIGKILL)
+        # Stop the pool before killing its workers, so no replacement can escape.
+        supervisor.kill()
+        supervisor.wait(timeout=5)
+        for pid in workers:
+            send(pid, signal.SIGKILL)
+        retained = self.owner.get_task(task)
+        self.assertEqual([a.id for a in retained.agents], [first.id])
+        messages = self.owner.history(first.id).messages
+        self.assertEqual([message.seq for message in messages], [0, 1])
+        self.assertEqual([c.call_id for c in retained.agents[0].calls], ["gate"])
+        self.start_supervisor(workers=2)
+        second = self.running_call(task, "gate", attempt=2).attempts[1]
+        self.assertNotIn(second.pid, workers)
+        release.touch()
+        self.finished(task)

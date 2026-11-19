@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def matching_pids(*parts: str, parent: int | None = None) -> list[int]:
     """Find subprocesses by parent and command line using the OS process table."""
-    rows = subprocess.check_output(["ps", "-ax", "-o", "pid=,ppid=,command="], text=True)
+    rows = subprocess.check_output(["ps", "-axww", "-o", "pid=,ppid=,command="], text=True)
     matches = []
     for row in rows.splitlines():
         pid, ppid, *command = row.split(maxsplit=2)
@@ -61,6 +61,18 @@ class SwarmTest(unittest.TestCase):
         self.state = Path(directory.name)
         self.script = self.state / "script.json"
         self.logs: list[Path] = []
+        self.url = ""
+        self.addCleanup(self._stop_stragglers)
+
+    def _stop_stragglers(self) -> None:
+        # A failed assertion can leave shims alive after the supervisor exits.
+        if self.url:
+            for shim in matching_pids("-m swarm.supervisor.shim", f"--server {self.url} "):
+                for payload in matching_pids(parent=shim):
+                    send(payload, signal.SIGKILL)
+                send(shim, signal.SIGKILL)
+        for worker in matching_pids("-m tests.fakes", str(self.script)):
+            send(worker, signal.SIGKILL)
 
     def launch(self, *args: str) -> subprocess.Popen:
         """Launch a Python entry point; collect diagnostics and register cleanup."""

@@ -1,11 +1,12 @@
 """Run real payloads through the runner and launch shim."""
 
 import base64
+import signal
 from pathlib import Path
 
 from swarm import wire
 from tests.fakes import call
-from tests.helpers import SwarmTest
+from tests.helpers import SwarmTest, matching_pids, send
 
 
 PAYLOAD = """\
@@ -51,3 +52,46 @@ class ProcessTest(SwarmTest):
         log = self.owner.read_log(proc.id)
         self.assertTrue(log.eof)
         self.assertEqual(base64.b64decode(log.data_b64), b"first\nsecond\n")
+
+    def launch_pids(self, task: str, process: str) -> tuple[int, int]:
+        """Find the shim and its payload using the public launch event and process table."""
+        event = next(event for event in self.owner.events(task).events
+                     if event.type == "launch_granted" and event.data["process_id"] == process)
+        launch = event.data["launch_id"]
+        [shim] = self.until(lambda: matching_pids("-m swarm.supervisor.shim", f"--launch {launch}"))
+        [payload] = self.until(lambda: matching_pids(parent=shim))
+        return shim, payload
+
+    def test_t10_background_payload_survives_all_worker_loss(self) -> None:
+        release = self.state / "finish-worker-tool"
+        payload_release = self.state / "finish-payload"
+        first_turn = [
+            call("process_start", "start", argv=self.command(payload_release), lifetime="task"),
+            call("wait_for_release", "gate", path=str(release)),
+        ]
+        self.set_scripts({"keep process": [first_turn, "done"]})
+        self.start_server()
+        self.start_supervisor()
+        task = self.submit("keep process", "process_start", "wait_for_release", "process_read", "process_stop")
+        first = self.running_call(task, "gate").attempts[0]
+        process = self.process(task, "running")
+        before = self.launch_pids(task, process.id)
+        prefix = self.until(lambda: self.owner.read_log(process.id, max_bytes=6),
+                            lambda chunk: chunk.next_offset == 6)
+        self.assertEqual(base64.b64decode(prefix.data_b64), b"first\n")
+        # Fill in the real process ID and offset for the turn not played yet.
+        self.set_scripts({"keep process": [first_turn, [
+            call("process_read", "read", process_id=process.id, offset=prefix.next_offset),
+            call("process_stop", "stop", process_id=process.id),
+        ], "done"]})
+        send(first.pid, signal.SIGKILL)
+        self.running_call(task, "gate", attempt=2)
+        self.assertEqual(self.launch_pids(task, process.id), before)
+        release.touch()
+        agent = self.finished(task)
+        log = wire.LogChunk.model_validate(next(c for c in agent.calls if c.call_id == "read").outcome.result)
+        self.assertEqual((log.offset, base64.b64decode(log.data_b64)), (6, b"second\n"))
+        ended = self.process(task, "ended")
+        self.assertEqual((ended.id, ended.outcome, ended.signal), (process.id, "signaled", signal.SIGTERM))
+        grants = [event for event in self.owner.events(task).events if event.type == "launch_granted"]
+        self.assertEqual(len(grants), 1)

@@ -10,7 +10,8 @@ from pathlib import Path
 from swarm import wire
 
 from .errors import ApiError
-from .http import Deps
+from .deps import Deps
+from .processes import on_process_end
 from .store import Tx, json_text, new_id
 
 
@@ -20,11 +21,6 @@ def _hash(value: str) -> str:
 
 def _body(request: wire.WireModel) -> str:
     return _hash(json_text(request.model_dump(mode="json")))
-
-
-def _end(tx: Tx, process_id: str) -> None:
-    from .processes import on_process_end
-    on_process_end(tx, process_id)
 
 
 def next_launch(deps: Deps, request: wire.NextLaunchRequest) -> wire.LaunchOrder | None:
@@ -107,7 +103,7 @@ def _retry_or_end(tx: Tx, deps: Deps, row: dict) -> None:
         tx.run("UPDATE processes SET state='requested', current_launch=NULL WHERE id=?", row["id"])
     else:
         tx.run("UPDATE processes SET state=?, outcome='not_started', ended_at=? WHERE id=?", state, tx.now, row["id"])
-        _end(tx, row["id"])
+        on_process_end(tx, row["id"])
     tx.event(row["task_id"], row["agent_id"], "process_" + state, process_id=row["id"])
 
 
@@ -148,7 +144,7 @@ def _apply_exit(tx: Tx, deps: Deps, launch: dict, request: wire.ExitReport) -> w
                    log_bytes=?, truncated_bytes=?, ended_at=? WHERE id=?""", outcome,
                request.exit_code, request.signal, request.log_bytes, request.truncated_bytes, tx.now, row["id"])
         tx.event(row["task_id"], row["agent_id"], "process_ended", process_id=row["id"], outcome=outcome)
-        _end(tx, row["id"])
+        on_process_end(tx, row["id"])
     return wire.Ack()
 
 
@@ -208,7 +204,7 @@ def expire_launches(deps: Deps) -> None:
                 tx.run("UPDATE processes SET state='ended', outcome='unknown', log_bytes=?, ended_at=? WHERE id=?",
                        size, tx.now, row["id"])
                 tx.event(row["task_id"], row["agent_id"], "process_ended", process_id=row["id"], outcome="unknown")
-                _end(tx, row["id"])
+                on_process_end(tx, row["id"])
 
 
 def enforce_lifetimes(deps: Deps) -> None:
@@ -219,7 +215,7 @@ def enforce_lifetimes(deps: Deps) -> None:
             tx.run("UPDATE launches SET state='revoked', ended_at=? WHERE id=? AND state='issued'", tx.now, row["current_launch"])
             tx.run("UPDATE processes SET state='ended', outcome='not_started', ended_at=? WHERE id=?", tx.now, row["id"])
             tx.event(row["task_id"], row["agent_id"], "process_ended", process_id=row["id"], outcome="not_started")
-            _end(tx, row["id"])
+            on_process_end(tx, row["id"])
 
 
 def recover_after_restart(deps: Deps) -> None:

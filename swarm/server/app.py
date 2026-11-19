@@ -9,12 +9,11 @@ import secrets
 import threading
 import time
 from dataclasses import replace
-from pathlib import Path
 
-from swarm import wire
-from . import leases, processes
+from . import launches, leases
 from .config import DEFAULT_PORT, ServerConfig
-from .http import Deps, make_http_server
+from .deps import Deps
+from .http import make_http_server
 from .policy import default_policy, load_policy
 from .store import Store
 
@@ -57,7 +56,7 @@ class Server:
             policy = load_policy(self.config.policy_path) if self.config.policy_path else default_policy()
             self.deps = Deps(store, self.config, policy, tokens, time.time())
             leases.recover_after_restart(self.deps)
-            processes.recover_after_restart(self.deps)
+            launches.recover_after_restart(self.deps)
             self._stop.clear()
             self._reaper = threading.Thread(target=reaper_loop, args=(self.deps, self._stop), daemon=True)
             self._reaper.start()
@@ -97,15 +96,10 @@ class Server:
             self._lock = None
 
 
-def health(deps: Deps, request: None) -> wire.Health:
-    """Return server identity and startup time."""
-    return wire.Health(ok=True, pid=os.getpid(), started_at=deps.started_at)
-
-
 def reaper_loop(deps: Deps, stop: threading.Event) -> None:
     """Expire leases and launches and enforce lifetimes at each interval."""
     while not stop.wait(deps.config.reaper_interval_s):
-        for reap in (leases.expire_leases, processes.expire_launches, processes.enforce_lifetimes):
+        for reap in (leases.expire_leases, launches.expire_launches, launches.enforce_lifetimes):
             try:
                 reap(deps)
             except Exception:

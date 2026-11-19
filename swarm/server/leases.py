@@ -12,8 +12,9 @@ from swarm import wire
 
 from . import calls, sandboxes, tasks
 from .errors import ApiError
-from .http import Deps
+from .deps import Deps
 from .store import Tx, fingerprint
+from .writes import fence
 
 
 def claim(deps: Deps, request: wire.ClaimRequest) -> wire.Claim | None:
@@ -68,21 +69,6 @@ def heartbeat(deps: Deps, request: wire.Heartbeat, agent_id: str) -> wire.Heartb
         tx.run("UPDATE agents SET lease_until=? WHERE id=?", tx.mono + ttl, agent_id)
         tx.run("UPDATE attempts SET activated=1 WHERE agent_id=? AND attempt=?", agent_id, request.attempt)
         return wire.HeartbeatReply(lease_until=tx.now + ttl)
-
-
-def fence(tx: Tx, agent_id: str, attempt: int) -> dict:
-    """I2. The agent row if `state == 'leased'`, attempt current, `lease_until > tx.mono`;
-    else `ApiError('stale')`. No change on refusal."""
-    agent = tx.one("SELECT * FROM agents WHERE id=?", agent_id)
-    if (agent is None or agent["state"] != "leased" or agent["attempt"] != attempt
-            or agent["lease_until"] is None or agent["lease_until"] <= tx.mono):
-        raise ApiError("stale")
-    return agent
-
-
-def mark_progress(tx: Tx, agent_id: str, attempt: int) -> None:
-    """Record useful work for the strike rule (I10)."""
-    tx.run("UPDATE attempts SET progress=1 WHERE agent_id=? AND attempt=?", agent_id, attempt)
 
 
 def end_attempt(tx: Tx, agent_id: str, attempt: int, reason: wire.AttemptEnd) -> str:

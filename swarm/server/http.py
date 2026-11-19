@@ -4,10 +4,11 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import re
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -15,21 +16,9 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from pydantic import ValidationError
 from swarm import wire
 from swarm.wire import Route, WireModel
-from .config import ServerConfig
+from . import calls, launches, leases, processes, steps, tasks
+from .deps import Deps
 from .errors import ApiError
-from .policy import CommandPolicy
-from .store import Store
-
-
-@dataclass(frozen=True)
-class Deps:
-    """Dependencies shared by route handlers."""
-    store: Store
-    config: ServerConfig
-    policy: CommandPolicy
-    tokens: dict[str, str]
-    started_at: float
-    launch_secret: str | None = None
 
 
 Handler = Callable[..., WireModel | None]
@@ -37,15 +26,22 @@ Handler = Callable[..., WireModel | None]
 
 def handlers() -> dict[str, Handler]:
     """Map every wire route to its domain handler."""
-    from . import app, calls, leases, processes, steps, tasks
-    modules = (app, calls, leases, processes, steps, tasks)
-    result = {}
+    modules = (calls, launches, leases, processes, steps, tasks)
+    result = {"health": health}
+
     for route in wire.ROUTES:
+        if route.name in result:
+            continue
         handler = next((getattr(module, route.name) for module in modules if hasattr(module, route.name)), None)
         if handler is None:
             raise RuntimeError(f"missing handler: {route.name}")
         result[route.name] = handler
     return result
+
+
+def health(deps: Deps, request: None) -> wire.Health:
+    """Return server identity and startup time."""
+    return wire.Health(ok=True, pid=os.getpid(), started_at=deps.started_at)
 
 
 def match(method: str, path: str) -> tuple[Route, dict[str, Any]] | None:

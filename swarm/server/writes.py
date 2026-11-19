@@ -1,11 +1,12 @@
-"""Stored replies shared by owner and agent writes (I3)."""
+"""Read stored replies before fencing agent writes (I2, I3)."""
 
 from dataclasses import dataclass
 from typing import Self
 
 from swarm import wire
 
-from .http import Deps
+from .deps import Deps
+from .errors import ApiError
 from .store import Tx, fingerprint
 
 
@@ -29,8 +30,6 @@ class Reply:
 
     def read(self, tx: Tx, deps: Deps) -> wire.WireModel | None:
         """Replay an owner, terminal, or current-attempt reply."""
-        from .leases import fence
-
         stored = deps.store.stored_reply(tx, self.scope, self.request_id, self.fingerprint)
         if stored is None:
             return None
@@ -43,3 +42,18 @@ class Reply:
         deps.store.save_reply(tx, self.scope, self.request_id, self.fingerprint, reply.model_dump(mode="json"),
                               terminal=terminal)
         return reply
+
+
+def fence(tx: Tx, agent_id: str, attempt: int) -> dict:
+    """I2. The agent row if `state == 'leased'`, attempt current, `lease_until > tx.mono`;
+    else `ApiError('stale')`. No change on refusal."""
+    agent = tx.one("SELECT * FROM agents WHERE id=?", agent_id)
+    if (agent is None or agent["state"] != "leased" or agent["attempt"] != attempt
+            or agent["lease_until"] is None or agent["lease_until"] <= tx.mono):
+        raise ApiError("stale")
+    return agent
+
+
+def mark_progress(tx: Tx, agent_id: str, attempt: int) -> None:
+    """Record useful work for the strike rule (I10)."""
+    tx.run("UPDATE attempts SET progress=1 WHERE agent_id=? AND attempt=?", agent_id, attempt)

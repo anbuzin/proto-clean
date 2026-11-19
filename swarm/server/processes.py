@@ -1,6 +1,6 @@
 """Process records, server tools and exact-byte log reads.
 
-Launch handshakes and recovery live in ``_launches``. The server never starts a
+Launch handshakes and recovery live in ``launches``. The server never starts a
 payload; it only records the order and accepts facts from the granted shim.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 from swarm import wire
 
 from . import calls, sandboxes
-from .http import Deps
+from .deps import Deps
 from .policy import Decision
 from .store import Tx, fingerprint, json_text, new_id
 
@@ -226,9 +226,3 @@ def stop_process(deps: Deps, request: wire.OwnerWrite, process_id: str) -> wire.
         reply = _view(tx.require("SELECT * FROM processes WHERE id=?", process_id))
         deps.store.save_reply(tx, "owner", request.request_id, fp, reply.model_dump(mode="json"))
         return reply
-
-
-# Public route and reaper functions are kept here for the HTTP and app modules.
-from ._launches import (authenticate_launch, enforce_lifetimes, expire_launches,
-                        grant_launch, launch_heartbeat, next_launch,
-                        recover_after_restart, report_exit)

@@ -11,10 +11,10 @@ from pydantic import ValidationError
 from swarm import wire
 
 from . import calls, leases, tasks
-from ._replies import Reply
 from .errors import ApiError
-from .http import Deps
+from .deps import Deps
 from .store import Tx, json_text
+from .writes import Reply, fence, mark_progress
 
 
 def admit_model_call(deps: Deps, request: wire.ModelCallRequest, agent_id: str) -> wire.ModelCallReply:
@@ -27,7 +27,7 @@ def admit_model_call(deps: Deps, request: wire.ModelCallRequest, agent_id: str) 
     with deps.store.write() as tx:
         if replay := key.read(tx, deps):
             return replay
-        agent = leases.fence(tx, agent_id, request.attempt)
+        agent = fence(tx, agent_id, request.attempt)
         last = _last(tx, agent_id)
         if last is None or last["kind"] not in {"user", "tools"} or request.step_seq != last["seq"] + 1:
             raise ApiError("conflict", "model call is not the next step")
@@ -65,7 +65,7 @@ def commit_step(deps: Deps, request: wire.StepRequest, agent_id: str) -> wire.St
     with deps.store.write() as tx:
         if replay := key.read(tx, deps):
             return replay
-        agent = leases.fence(tx, agent_id, request.attempt)
+        agent = fence(tx, agent_id, request.attempt)
         last = _last(tx, agent_id)
         seq = last["seq"] + 1 if last else 0
         if request.expected_seq != seq:
@@ -75,7 +75,7 @@ def commit_step(deps: Deps, request: wire.StepRequest, agent_id: str) -> wire.St
         tx.run("INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?)", agent_id, seq, request.attempt,
                request.kind, roles[request.kind], json_text(request.message))
         over_budget = request.kind == "model" and _commit_model(tx, agent, request)
-        leases.mark_progress(tx, agent_id, request.attempt)
+        mark_progress(tx, agent_id, request.attempt)
         tx.event(agent["task_id"], agent_id, "step_committed", seq=seq, kind=request.kind)
         if over_budget:
             tasks.end_agent(tx, agent_id, "failed", reason="budget")
@@ -90,7 +90,7 @@ def yield_agent(deps: Deps, request: wire.AgentWrite, agent_id: str) -> wire.Yie
     with deps.store.write() as tx:
         if replay := key.read(tx, deps):
             return replay
-        leases.fence(tx, agent_id, request.attempt)
+        fence(tx, agent_id, request.attempt)
         pending = calls.pending(tx, agent_id)
         if all(call.state == "done" for call in pending):
             return key.save(tx, deps, wire.YieldReply(action="continue", state="leased"))
@@ -108,7 +108,7 @@ def finish_agent(deps: Deps, request: wire.FinishRequest, agent_id: str) -> wire
     with deps.store.write() as tx:
         if replay := key.read(tx, deps):
             return replay
-        leases.fence(tx, agent_id, request.attempt)
+        fence(tx, agent_id, request.attempt)
         pending = calls.pending(tx, agent_id)
         if request.status == "done":
             last = _last(tx, agent_id)

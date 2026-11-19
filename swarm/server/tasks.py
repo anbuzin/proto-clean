@@ -8,10 +8,10 @@ from pathlib import Path
 from swarm import wire
 
 from . import calls, leases
-from ._replies import Reply
 from .errors import ApiError
-from .http import Deps
+from .deps import Deps
 from .store import Tx, json_text, new_id
+from .writes import Reply
 
 # --- Owner routes --------------------------------------------------------------------
 

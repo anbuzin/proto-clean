@@ -8,10 +8,10 @@ from collections.abc import Callable
 from swarm import wire
 
 from . import leases, processes, tasks
-from ._replies import Reply
 from .errors import ApiError
-from .http import Deps
+from .deps import Deps
 from .store import Tx, json_text
+from .writes import Reply, fence, mark_progress
 
 # One-phase server tool: runs inside the start transaction.
 ServerTool = Callable[[Tx, Deps, dict, wire.CallView, wire.WireModel], wire.CallStartReply]
@@ -65,7 +65,7 @@ def finish_call(deps: Deps, request: wire.CallFinish, agent_id: str, step_seq: i
     with deps.store.write() as tx:
         if replay := key.read(tx, deps):
             return replay
-        agent = leases.fence(tx, agent_id, request.attempt)
+        agent = fence(tx, agent_id, request.attempt)
         call = _call(tx, agent_id, step_seq, call_id)
         if call.state != "running" or call.attempt != request.attempt:
             raise ApiError("conflict", "attempt has no run grant")
@@ -102,7 +102,7 @@ def fill_call(tx: Tx, agent_id: str, step_seq: int, call_id: str, result: wire.C
         agent = tx.require("SELECT * FROM agents WHERE id=?", agent_id)
         _set_result(tx, call, None if unknown else result, unknown=unknown, task_id=agent["task_id"])
         if not unknown and agent["lease_until"] is not None:
-            leases.mark_progress(tx, agent_id, agent["attempt"])
+            mark_progress(tx, agent_id, agent["attempt"])
         leases.settle(tx, agent_id)
 
 
@@ -127,7 +127,7 @@ def start_context(tx: Tx, deps: Deps, request: wire.AgentWrite, agent_id: str, s
     key = Reply.for_request("start_call", request, agent_id=agent_id, step_seq=step_seq, call_id=call_id)
     if replay := key.read(tx, deps):
         return None, None, replay
-    agent = leases.fence(tx, agent_id, request.attempt)
+    agent = fence(tx, agent_id, request.attempt)
     for call in pending(tx, agent_id):
         if (call.step_seq, call.call_id) == (step_seq, call_id):
             return agent, call, _start_action(call, request.attempt)
@@ -147,7 +147,7 @@ def complete(tx: Tx, call: wire.CallView, result: wire.CallResult) -> wire.CallS
     """Store a completed tool result and mark the active attempt's progress."""
     agent = tx.require("SELECT task_id, attempt FROM agents WHERE id=?", call.agent_id)
     _set_result(tx, call, result, task_id=agent["task_id"])
-    leases.mark_progress(tx, call.agent_id, agent["attempt"])
+    mark_progress(tx, call.agent_id, agent["attempt"])
     return wire.CallStartReply(action="use", outcome=result)
 
 

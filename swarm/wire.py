@@ -68,7 +68,7 @@ class WireModel(BaseModel):
 
 # --- Task spec (what the owner submits) ------------------------------------------------
 
-class ExternalSpec(WireModel):
+class ExternalSpec(WireModel):  # create_task fills the defaults when kind is `external` and this is None
     """Options for kind `external`: one turn of a coding CLI through `ai.external`.
     The turn is one `unsafe` tool call: a cut turn blocks the agent for the owner."""
     cli: Literal["fx"] = "fx"
@@ -109,7 +109,7 @@ class CallView(WireModel):
     step_seq: int
     call_id: str
     tool: str
-    args: dict[str, JSON]
+    args: JSON                                  # an object for a runnable call; any JSON for an `error` call
     safety: Safety
     state: CallState
     attempt: int | None = None                  # attempt that holds or held the `run` grant
@@ -269,7 +269,8 @@ class LogChunk(WireModel):
     offset: int
     next_offset: int
     eof: bool                 # the process ended and offset reached its final log size
-    gap: bool = False         # the log file is missing: no bytes can come (not the same as eof)
+    gap: bool = False         # the file is missing for a process that was granted: no bytes can come
+    # A process not granted yet: empty chunk, eof False. Ended `not_started`: empty chunk, eof True.
 
 
 class Health(WireModel):
@@ -340,15 +341,17 @@ class ModelCallRequest(AgentWrite):
 
 class ModelCallReply(WireModel):
     admitted: bool
-    remaining_tokens: int
+    remaining_tokens: int        # task budget minus all used and reserved tokens, this estimate included
 
 
 class StepRequest(AgentWrite):
     """Kinds and when each is valid (I4):
     `user`: seq 0 only, no calls. `model`: needs the admitted model call of this attempt
-    and seq; `calls` lists every tool call of the message. `tools`: the tool message of
-    the pending step; every call of that step is `done`; `result_call_ids` are its
-    call IDs in order. A `model` step with no calls is the final reply."""
+    and seq; `calls` lists every tool call of the message, in order (the server stores
+    the order as `calls.ordinal`). `tools`: the tool message of the pending step; every
+    call of that step is `done`; `result_call_ids` equal its call IDs in ordinal order.
+    A `model` step with no calls is the final reply. Kind `external` only: the final
+    `model` step right after the `tools` step of `cli_turn` needs no admission."""
     kind: StepKind
     expected_seq: int
     message: dict[str, JSON]
@@ -401,7 +404,7 @@ class LaunchOrder(WireModel):
     argv: list[str]
     cwd: str
     env: dict[str, str]
-    log_path: str
+    log_path: str                # `<process_dir>/log`; `exit.json` is in the same directory
     log_cap_bytes: int
     private_dirs: list[str]      # HOME and TMPDIR of the payload; the shim makes them (0700)
     grant_deadline_s: float      # seconds from now
@@ -428,11 +431,13 @@ class LaunchHeartbeatReply(WireModel):
 
 
 class ExitReport(WireModel):
+    """Also the content of `exit.json`."""
     started: bool = True        # False: the shim was denied and killed the held child (`not_started`)
     exit_code: int | None = None
     signal: int | None = None
     log_bytes: int = 0
     truncated_bytes: int = 0
+    output_tail: str = ""       # last 4 KiB of the log, decoded UTF-8 with replacement
 
 
 # --- Server tool arguments (the server validates them; the worker mirrors them as stubs) -

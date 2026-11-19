@@ -27,7 +27,7 @@ def gateway_model(api_key: str) -> ModelFactory:
     raise NotImplementedError
 
 
-def estimate_tokens(messages: list[ai.types.messages.Message], tools: list[ai.Tool], max_output_tokens: int) -> int:
+def estimate_tokens(messages: list[ai.types.messages.Message], tools: list[ai.AgentTool], max_output_tokens: int) -> int:
     """UTF-8 bytes of the JSON of messages and tool schemas / 4, plus `max_output_tokens`.
     A heuristic: overshoot is caught at commit (I11)."""
     raise NotImplementedError

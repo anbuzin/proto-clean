@@ -41,7 +41,7 @@ def current_call() -> CallContext:
 
 @dataclass(frozen=True)
 class ToolEntry:
-    tool: ai.Tool
+    tool: ai.AgentTool          # what `@ai.tool` returns; `.tool` is the declaration for `ai.stream`
     safety: Safety
 
 
@@ -50,6 +50,10 @@ class Registry:
         raise NotImplementedError
 
     def get(self, name: str) -> ToolEntry | None:
+        raise NotImplementedError
+
+    def entries(self, names: list[str]) -> list[ToolEntry]:
+        """The entries for the names of a spec that the registry has, in order."""
         raise NotImplementedError
 
     def agent(self, names: list[str]) -> ai.Agent:

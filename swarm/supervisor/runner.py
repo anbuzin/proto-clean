@@ -27,5 +27,8 @@ class Runner:
         raise NotImplementedError
 
     def run(self, stop) -> None:
-        """Until `stop` is set: `next_launch` (long poll), `launch`, reap exited shims."""
+        """Until `stop` is set: `next_launch` (long poll), `launch`, reap exited shims.
+        On a transport error or 503: back off (0.5 s doubling to 10 s) and start a fresh
+        poll; a lost order is never reused or spawned. Reaping goes on while the server
+        is down."""
         raise NotImplementedError

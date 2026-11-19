@@ -12,10 +12,14 @@ from .store import Tx
 
 
 def claim(deps: Deps, request: wire.ClaimRequest) -> wire.Claim | None:
-    """Long poll for at most `wait_s`. Replay: a stored reply for this request ID with the
-    attempt still current is returned again; a reservation (reply NULL) is waited for.
+    """Long poll for at most `wait_s`. Replay of a known request ID: find its reserved
+    attempt (`attempts.claim_request`) first. Ended (clone failure, expiry, restart):
+    `ApiError('stale')`, and the worker starts a new claim with a new request ID. Still
+    cloning at the end of `wait_s`: `ApiError('busy')` (503; the client retries the same
+    ID). Ready and current: the stored claim.
     1. Reserve, one transaction: oldest `ready` agent with `ready_at <= now`, a kind in
-       `kinds`, and (child, first attempt) its seed attempt ended. `attempt += 1`,
+       `kinds`, and, if the agent has no ready copy yet and is a child, its seed attempt
+       ended. `attempt += 1`,
        `leased`, `lease_until = mono + clone_ttl_s`, attempts row with `claim_request`,
        `sandboxes.reserve`, stored reply NULL - all in this transaction (I3, I8).
     2. `sandboxes.materialize` with no transaction open.

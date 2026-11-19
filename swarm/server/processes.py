@@ -19,20 +19,24 @@ from .store import Tx
 
 def run_command(tx: Tx, deps: Deps, agent: dict, call: wire.CallView, args: wire.RunCommandArgs) -> wire.CallStartReply:
     """One phase. Policy refused: `use` with an error. Else process `requested`
-    (lifetime `command`, cwd = this attempt's copy, argv and env from the decision,
+    (lifetime `command`, cwd = this attempt's copy, the checked argv and the decision env,
     `timeout_s`); call `waiting` with `process_id`; reply `wait` (a barrier)."""
     raise NotImplementedError
 
 
-def process_start(deps: Deps, agent_id: str, attempt: int, step_seq: int, call_id: str,
+def process_start(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int, call_id: str,
                   args: wire.ProcessStartArgs) -> wire.CallStartReply:
-    """Two phases. 1: fence, policy (refused: commit an error result). 2: clone this
-    attempt's copy to `processes/<id>/work/` (id from the call key). 3: fence again;
-    process `requested` (lifetime from args, cwd = work); call `done` with `{process_id}`."""
+    """Two phases (calls.start_call). 1: policy (refused: commit `use` with an error).
+    2: clone this attempt's copy to a provisional path of its own,
+    `processes/<new id>/work/` with a new random id per try, so a retry never removes
+    the work directory of a winner. 3: if still current and `planned`: process
+    `requested` with that id (lifetime from args, cwd = work), call `done` with
+    `{process_id}`; a clone error: call `done` with an error result, reply `use`. A loser
+    leaves its directory unused."""
     raise NotImplementedError
 
 
-def process_read(deps: Deps, agent_id: str, attempt: int, step_seq: int, call_id: str,
+def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int, call_id: str,
                  args: wire.ProcessReadArgs) -> wire.CallStartReply:
     """Two phases. 1: fence, same task, snapshot (state, final `log_bytes`). 2: `read_log`.
     3: fence again; call `done` with the `LogChunk` dict."""
@@ -74,15 +78,21 @@ def launch_heartbeat(deps: Deps, request: wire.LaunchHeartbeat, launch_id: str) 
 
 
 def report_exit(deps: Deps, request: wire.ExitReport, launch_id: str) -> wire.Ack:
-    """I13. Launch `ended` with `exit_json`, `exit_hash`. Current: process `ended`
-    (`exited`, `signaled`, or `not_started` if `started` is False), log facts;
-    `on_process_end`. Duplicate same body: Ack. Ended with another body: `conflict`."""
+    """I13. `started=False` for the current `issued` launch (a denial): one transaction,
+    as a revoke: launch `ended`; process `ended` `not_started` if desired is `stopped`,
+    else `requested` again, or `failed` `not_started` at `launch_tries`;
+    `on_process_end` on a terminal result. A late denial for a launch that is no longer
+    current: launch `ended`, process unchanged.
+    `started=True` (granted launch): launch `ended` with `exit_json`, `exit_hash`;
+    current: process `ended` (`exited`, `signaled`), log facts, `on_process_end`.
+    Duplicate same body: Ack. Ended with another body: `conflict`."""
     raise NotImplementedError
 
 
 def on_process_end(tx: Tx, process_id: str) -> None:
     """Every terminal path calls this. Lifetime `command`: fill the call with a
-    `CommandResult`. A cut (I16: outcome `unknown`, or `signaled` with a stop reason in
+    `CommandResult`; `output_tail` from the launch's `exit_json`, or "" when there is no
+    receipt (no file read in this transaction). A cut (I16: outcome `unknown`, or `signaled` with a stop reason in
     `wire.CUT_STOP_REASONS`): `local` -> outcome `interrupted`; `external` -> call
     `unknown`. A `timeout` or `agent` stop is a normal result."""
     raise NotImplementedError
@@ -120,8 +130,9 @@ def list_processes(deps: Deps, request: None, task_id: str) -> wire.ProcessList:
 
 
 def read_log(deps: Deps, request: wire.LogQuery, process_id: str) -> wire.LogChunk:
-    """Exact bytes from `offset`, base64, no transaction open during the read. `eof`: the
-    process ended and `next_offset == log_bytes`. `gap`: the file is missing."""
+    """Exact bytes from `offset`, base64, no transaction open during the read. Not granted
+    yet: empty, eof False. Ended `not_started`: empty, eof True. `eof`: ended and
+    `next_offset == log_bytes`. `gap`: the file is missing for a granted process."""
     raise NotImplementedError
 
 

@@ -10,8 +10,10 @@ protocol. The server accepts `cli_turn` only for kind `external`, as the only ca
    `harness.session.events()` and stop at the first `ai.events.StreamEnd`;
    `finish_call(done)` with the final text. Any error: `finish_call(unknown)`.
    `use` (a turn that finished before a crash): take the stored text.
-4. Commit kind `tools`; then a final `model` step (admitted with 1 token) with the text;
-   `finish_agent(done)`.
+4. Commit kind `tools`; then the final `model` step with the text, with no admission
+   (`wire.StepRequest`); `finish_agent(done)`.
+Each claim resumes from the last committed step: it does only the steps above that are
+not in `claim.history` yet (a `use` of a finished `cli_turn` skips the CLI).
 
 A worker loss during step 3 leaves the call `running` -> `unknown`: the agent is
 `blocked` until the owner resolves it (I6, I7). No resume, no native store. The CLI

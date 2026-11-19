@@ -1,7 +1,7 @@
 # ARCHITECTURE: a client-server agent swarm primitive
 
-Status: plan and skeleton, revision 2 (planner, run 2, 2026-11-19), after the check `../run2/checks/plan-check.md`
-(replies: `../run2/checks/plan-fix.md`). Sources: `../proto/` (run 1), `../DESIGN.md` rev 8, `../DESIGN-launch.md`.
+Status: plan and skeleton, revision 3, final for the builders (planner, run 2, 2026-11-19), after the checks
+`../run2/checks/plan-check.md` and `plan-recheck.md` (replies: `../run2/checks/plan-fix.md`, `plan-fix2.md`). Sources: `../proto/` (run 1), `../DESIGN.md` rev 8, `../DESIGN-launch.md`.
 This file is the only brief for the builders. Real code: `swarm/wire.py` (the contract) and `swarm/server/schema.sql`.
 Each other module is a stub with its contract. The aim is a clean prototype for the normal crash (`kill -9` of
 workers, of the supervisor, of the server), not protection against hostile same-user code (section 12, "Limits").
@@ -40,7 +40,7 @@ Each is a test target (section 10). The module that owns it is in brackets.
 |---|---|
 | I1 | The server replies 2xx only after `COMMIT` returns. [store, http] |
 | I2 | Fence: each agent write checks, after `BEGIN IMMEDIATE`, that the agent is `leased`, the attempt is current, and `lease_until > monotonic now`. A stale write changes nothing. [leases] |
-| I3 | Each owner and agent write has a `request_id`; its reply is stored in the same transaction, keyed by a fingerprint of route, path, and body. Replay rules: `wire.py` header (a reply that ended the attempt replays always; any other only while the attempt is current). [store, each domain write] |
+| I3 | Each owner and agent write except `heartbeat` has a `request_id`; its reply is stored in the same transaction, keyed by a fingerprint of route, path, and body. Replay rules: `wire.py` header (a reply that ended the attempt replays always; any other only while the attempt is current). [store, each domain write] |
 | I4 | A model reply and its tool calls commit in one `model` step before any tool starts. Each tool result commits before the next tool call or model call. The `tools` step commits only when every tool call of the pending step is `done`. [steps, calls, worker] |
 | I5 | A tool call gets `run` at most once per attempt. A one-phase server tool runs inside `start_call`; a two-phase one commits only after a second fence. Both: exactly once. [calls] |
 | I6 | When an attempt is lost or the server restarts, in the same transaction: each `running` `unsafe` tool call becomes `unknown`; `idempotent` ones get `run` again in the next attempt. [leases] |
@@ -81,7 +81,10 @@ I2, I3, I8 a late or retried worker cannot change a committed fact or a file tha
    all clients use swarm.client; all share swarm.wire
 ```
 
-Endpoint: the server listens on a stable URL. `--port N` is saved in `state_dir/server.json`; with no `--port`, the
+Endpoint: the server listens on a stable URL. During an outage the clients wait it out: agent writes retry to the
+local deadline; the runner backs off (0.5 s to 10 s) and starts a fresh `next_launch` poll (a lost order is never
+reused), and it keeps reaping shims; shims keep their payload and retry `report_exit` (`exit.json` stays on disk).
+ `--port N` is saved in `state_dir/server.json`; with no `--port`, the
 saved port is used again, else 8700 (`--port 0` picks a free port once and saves it). Thus a restarted server has
 the same URL, and the workers, the runner, and the shims reach it again with the credentials that they hold.
 
@@ -136,25 +139,26 @@ Models and the replay rules are in `swarm/wire.py`; the table is `wire.ROUTES`. 
 | cancel_task | POST /v1/tasks/{task_id}/cancel | owner | OwnerWrite -> TaskView |
 | get_history | GET /v1/agents/{agent_id}/history | owner | ?after_seq&limit -> HistoryPage |
 | list_events | GET /v1/events | owner | ?task_id&after&limit&wait_s -> EventsPage |
-| resolve_call | POST /v1/agents/{a}/calls/{step_seq}/{call_id}/resolve | owner | ResolveCall -> CallView |
+| resolve_call | POST /v1/agents/{agent_id}/calls/{step_seq}/{call_id}/resolve | owner | ResolveCall -> CallView |
 | list_processes | GET /v1/tasks/{task_id}/processes | owner | - -> ProcessList |
-| read_log | GET /v1/processes/{p}/log | owner | ?offset&max_bytes -> LogChunk |
-| stop_process | POST /v1/processes/{p}/stop | owner | OwnerWrite -> ProcessView |
+| read_log | GET /v1/processes/{process_id}/log | owner | ?offset&max_bytes -> LogChunk |
+| stop_process | POST /v1/processes/{process_id}/stop | owner | OwnerWrite -> ProcessView |
 | claim | POST /v1/claims | worker | ClaimRequest -> Claim, or 204 |
-| heartbeat | POST /v1/agents/{a}/heartbeat | worker | Heartbeat -> HeartbeatReply |
-| admit_model_call | POST /v1/agents/{a}/model-calls | worker | ModelCallRequest -> ModelCallReply |
-| commit_step | POST /v1/agents/{a}/steps | worker | StepRequest (kind user, model, tools) -> StepReply |
-| start_call | POST /v1/agents/{a}/calls/{step_seq}/{call_id}/start | worker | AgentWrite -> CallStartReply |
+| heartbeat | POST /v1/agents/{agent_id}/heartbeat | worker | Heartbeat -> HeartbeatReply |
+| admit_model_call | POST /v1/agents/{agent_id}/model-calls | worker | ModelCallRequest -> ModelCallReply |
+| commit_step | POST /v1/agents/{agent_id}/steps | worker | StepRequest (kind user, model, tools) -> StepReply |
+| start_call | POST /v1/agents/{agent_id}/calls/{step_seq}/{call_id}/start | worker | AgentWrite -> CallStartReply |
 | finish_call | POST .../calls/{step_seq}/{call_id}/finish | worker | CallFinish -> CallView |
-| yield_agent | POST /v1/agents/{a}/yield | worker | AgentWrite -> YieldReply |
-| finish_agent | POST /v1/agents/{a}/finish | worker | FinishRequest -> AgentStateReply |
+| yield_agent | POST /v1/agents/{agent_id}/yield | worker | AgentWrite -> YieldReply |
+| finish_agent | POST /v1/agents/{agent_id}/finish | worker | FinishRequest -> AgentStateReply |
 | next_launch | POST /v1/runner/launches | runner | NextLaunchRequest -> LaunchOrder, or 204 |
-| grant_launch | POST /v1/launches/{l}/grant | launch | GrantRequest -> GrantReply |
-| launch_heartbeat | POST /v1/launches/{l}/heartbeat | launch | LaunchHeartbeat -> LaunchHeartbeatReply |
-| report_exit | POST /v1/launches/{l}/exit | launch | ExitReport -> Ack |
+| grant_launch | POST /v1/launches/{launch_id}/grant | launch | GrantRequest -> GrantReply |
+| launch_heartbeat | POST /v1/launches/{launch_id}/heartbeat | launch | LaunchHeartbeat -> LaunchHeartbeatReply |
+| report_exit | POST /v1/launches/{launch_id}/exit | launch | ExitReport -> Ack |
 
 Server tools (args in `wire.SERVER_TOOL_ARGS`): `memory_set`, `run_child(prompt, tools?)` (wait), `run_command(argv,
-timeout_s)` (wait, barrier; result `wire.CommandResult` with a 4 KiB output tail), `process_start(argv, lifetime)`
+timeout_s)` (wait, barrier; result `wire.CommandResult`; its 4 KiB output tail comes from the shim's `ExitReport`,
+empty when no receipt exists), `process_start(argv, lifetime)`
 and `process_read(process_id, offset, max_bytes)` (two-phase), `process_stop(process_id)`. Local tools: `read_file`,
 `write_file`, `list_files`, and `--tools` entries. Kind `external` only: `cli_turn`.
 
@@ -162,7 +166,7 @@ and `process_read(process_id, offset, max_bytes)` (two-phase), `process_stop(pro
 
 `swarm/server/schema.sql` is the source: `tasks` -> `agents` (tree by `parent_id`, pinned child seed, state, attempt,
 monotonic lease, strikes) -> `attempts` (worker, pid, claim request, activated, progress, end reason, sandbox copy);
-`messages` (opaque JSON); `calls` (tool calls: safety, state, result, child, process); `memory`; `model_calls`
+`messages` (step kind, opaque JSON); `calls` (tool calls: ordinal, safety, state, result, child, process); `memory`; `model_calls`
 (estimate, usage); `requests` (fingerprint, reply, terminal flag); `events`; `processes` (approved argv and env, cwd,
 class, lifetime, desired, stop reason, current launch, log facts) -> `launches` (secret hash, deadline, pid, grant
 and exit hashes, exit receipt). Columns `*_mono` hold the monotonic clock of the current server run.
@@ -177,7 +181,10 @@ Run a task. Owner `create_task` -> root `ready`. Claim (below) -> attempt 1, cop
 Claim (I3, I8). (1) One transaction: pick the agent, attempt+1, `leased` with the clone TTL, attempt row with the
 claim request ID, reserve the copy path, stored reply NULL. (2) Clone with no transaction open. (3) One transaction:
 fence that attempt, copy `ready`, normal TTL, store the reply. A retry with the same ID waits for step 3 and gets
-the same claim. A clone error: attempt `setup_failed`, agent `ready` again (3 tries, then `failed` `sandbox`).
+the same claim. Replay of a claim ID checks its reserved attempt first: ended -> `409 stale` (the worker makes a new
+ID), still cloning at the poll end -> `503 busy`, ready and current -> the stored claim. A clone error: attempt
+`setup_failed`, agent `ready` again (3 tries, then `failed` `sandbox`). The source is the agent's latest ready copy;
+with none yet (whatever the attempt number), the root workspace or the pinned child seed.
 Source stability: a source copy belongs to an ended attempt (a dead or yielded worker); `run_command` ended before
 the agent became ready; `process_start` payloads run in their own clone. A child's first claim waits until its
 pinned seed attempt (the parent attempt that called `run_child`) has ended, then clones that copy.
@@ -206,8 +213,9 @@ tool call `waiting` (I5). Not a barrier, so both start. The parent yields (attem
 runs; its end fills the parent's tool call with `{agent_id, status, result}` (I17). The last fill settles the
 parent to `ready`; attempt N+1 commits the `tools` step. A poisoned child gives an error result, not a hang.
 
-A background process. `process_start` (two-phase: fence and policy; clone the copy to `processes/<id>/work`; fence
-and commit) -> process `requested` with the approved argv and env. Runner `next_launch` -> launch `issued` and an
+A background process. `process_start` (two-phase: policy; clone the copy to a new provisional
+`processes/<id>/work` per try; then the stored-reply check, fence, still `planned`, commit; a clone error commits an
+error result) -> process `requested` with the approved argv and env. Runner `next_launch` -> launch `issued` and an
 order with the secret; the runner starts a shim. The shim holds the payload, gets the grant, releases it, writes the
 log, heartbeats. All workers die: the shim and payload live; a new attempt reads the log from its offset
 (`process_read`, two-phase). The exit report ends the process; a `command` process fills its `run_command` call.
@@ -219,12 +227,14 @@ Launch transitions. Only `processes.current_launch` changes the process row.
 | issued | grant, before deadline, desired `running` | `granted` (pid, grant hash); process `running`, `granted_at` |
 | issued | grant after deadline, or desired `stopped` | `granted=False`; shim kills the held child, reports `started=False` |
 | issued | deadline passes (reaper) or server startup | `revoked`; process `requested` again, or `failed` `not_started` at 3 tries |
-| issued, revoked | report with `started=False` | launch `ended`; process unchanged if already requeued |
+| issued, current | report with `started=False` (denied) | as a revoke, one transaction: launch `ended`; process `ended` `not_started` if desired `stopped`, else `requested` again or `failed` at 3 tries; waiters filled on a terminal result |
+| not current | report with `started=False` (late) | launch `ended`; process unchanged |
 | granted | same grant body | `granted` again (replay); another body: `granted=False` |
 | granted | heartbeat | clock stored; `stop` if desired `stopped` or the command timeout passed (reason `timeout`) |
 | revoked, ended, not current | heartbeat | `stop` |
 | granted | exit report | `ended`; process `ended` (`exited`, `signaled`); `on_process_end` |
 | ended | same report body / other body | `Ack` / `409 conflict` |
+| granted | exit report (`exit.json` has the same `ExitReport`, with `output_tail`) | the tail fills `CommandResult` |
 | granted | no heartbeat for 10 s | `exit.json` present: applied as a report; else process `ended` `unknown`, final size = file size |
 
 ## 8. Mechanisms of `proto/`: kept, simpler, deferred, removed
@@ -272,8 +282,8 @@ Launch transitions. Only `processes.current_launch` changes the process row.
   proc -> process; shell_run -> run_command; native -> loop. Process lifetime `command` (not "call").
 - Stack: Python 3.13, uv, `ai==0.10.0`, `pydantic==2.14.3` (declared, as `wire.py` uses it). HTTP on the standard
   library (`ThreadingHTTPServer`, `urllib`): no new package; the lock has the same 15 packages as `proto/`.
-- Scope cuts in revision 2, to pay for the fixes: the `checkpoint_call` route and column, Fx resume, `memory_get`
-  (memory is in the system message), `process_list`, the `--model-factory` switch, per-launch log cursors.
+- Scope cuts in revision 2, to pay for the fixes: the `checkpoint_call` route and column, Fx resume, the agent
+  tools `memory_get` (memory is in the system message) and `process_list` (the owner route stays), the `--model-factory` switch, per-launch log cursors.
 - Size: parts S + C + P are about 3,300 lines of logic plus `wire.py` (527 lines, mostly declarations): about 10%
   above the 3,000 aim, because the fixes added the claim reservation, two-phase tools, and the launch table. Each
   file stays below 300 lines except `wire.py`, which is one file so that the contract is in one place.

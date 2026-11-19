@@ -6,7 +6,8 @@ Commands:
          [--request-id ID] [--wait]       a full TaskSpec only through --spec
   show TASK_ID | history AGENT_ID | events [--task ID] [--follow]
   resolve AGENT_ID STEP_SEQ CALL_ID --result JSON [--error] [--request-id ID]
-  cancel TASK_ID [--request-id ID] | procs TASK_ID | log PROCESS_ID [--offset N] | stop PROCESS_ID
+  cancel TASK_ID [--request-id ID] | procs TASK_ID | log PROCESS_ID [--offset N]
+  stop PROCESS_ID [--request-id ID]       every owner write takes --request-id
 """
 
 from __future__ import annotations

@@ -11,8 +11,9 @@ from .store import Tx
 
 
 def create_task(deps: Deps, request: wire.CreateTask) -> wire.TaskCreated:
-    """One transaction: task, root agent `ready`, seed memory, event. `spec.external` only
-    with kind `external`; `spec.workspace` must be an existing directory."""
+    """One transaction: task, root agent `ready`, seed memory, event. Kind `external`
+    with `spec.external` None: store the spec with `ExternalSpec()` defaults. `external`
+    set with kind `loop`: `invalid`. `spec.workspace` must be an existing directory."""
     raise NotImplementedError
 
 

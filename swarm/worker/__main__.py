@@ -20,7 +20,8 @@ async def run_worker(client: AgentClient, worker_id: str, kinds: list[AgentKind]
                      model_factory: ModelFactory, registry: Registry) -> None:
     """Forever: claim (long poll); build a `Lease`; enter `model_factory(claim.spec)`;
     run `loop.run_loop_agent` or `external.run_external_agent`; close both. `Rejected(stale)`
-    ends the claim, not the worker. Any other error: exit code 1 (the pool starts a new one)."""
+    ends the claim, not the worker; a stale reply to a claim retry means its reserved
+    attempt ended: the next claim uses a new request ID. Any other error: exit code 1 (the pool starts a new one)."""
     raise NotImplementedError
 
 

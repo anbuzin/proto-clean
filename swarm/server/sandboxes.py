@@ -1,8 +1,9 @@
 """Sandbox copies: one directory per attempt (I8).
 
 Path: `state_dir/sandboxes/<agent_id>/a<attempt>/`. Source of a new copy: the agent's
-latest `ready` copy; first attempt: `spec.workspace` (root), the pinned seed attempt's
-copy (child), or nothing (empty). The source is stable in the normal crash: its attempt
+latest `ready` copy. If the agent has no ready copy yet (whatever the attempt number,
+so a failed first clone does not change the source): `spec.workspace` (root), the
+pinned seed attempt's copy (child), or nothing (empty). The source is stable in the normal crash: its attempt
 has ended (the worker is dead or yielded), `run_command` ended before the agent became
 ready, and `process_start` payloads run in their own clone, not in the agent's copy.
 """

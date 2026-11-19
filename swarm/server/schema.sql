@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS messages (
     agent_id TEXT NOT NULL REFERENCES agents(id),
     seq      INTEGER NOT NULL,
     attempt  INTEGER NOT NULL,
+    kind     TEXT NOT NULL CHECK (kind IN ('user', 'model', 'tools')),  -- wire.StepRequest.kind
     role     TEXT NOT NULL,
     json     TEXT NOT NULL,
     PRIMARY KEY (agent_id, seq)
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS calls (
     agent_id        TEXT NOT NULL REFERENCES agents(id),
     step_seq        INTEGER NOT NULL,            -- seq of the model reply that planned it
     call_id         TEXT NOT NULL,               -- tool_call_id from the model
+    ordinal         INTEGER NOT NULL,            -- position in StepRequest.calls; orders the tool message
     tool            TEXT NOT NULL,
     args_json       TEXT NOT NULL,
     safety          TEXT NOT NULL CHECK (safety IN ('server', 'idempotent', 'unsafe')),
@@ -134,7 +136,7 @@ CREATE TABLE IF NOT EXISTS processes (
     task_id      TEXT NOT NULL REFERENCES tasks(id),
     agent_id     TEXT NOT NULL REFERENCES agents(id),
     call_ref     TEXT NOT NULL UNIQUE,           -- "<agent_id>:<step_seq>:<call_id>" that made it
-    argv_json    TEXT NOT NULL,                  -- approved by the policy, exactly as run
+    argv_json    TEXT NOT NULL,                  -- the checked argv (argv[0] a bare name, found by PATH in env_json)
     env_json     TEXT NOT NULL,                  -- the full payload environment from the policy
     cwd          TEXT NOT NULL,                  -- run_command: the attempt's copy; process_start: own clone
     effect_class TEXT NOT NULL CHECK (effect_class IN ('local', 'external')),
@@ -168,7 +170,7 @@ CREATE TABLE IF NOT EXISTS launches (
     grant_hash     TEXT,                         -- body hash of the grant, for replay
     heartbeat_mono REAL,                         -- monotonic time of the last shim heartbeat
     exit_hash      TEXT,                         -- body hash of the exit report, for replay
-    exit_json      TEXT,                         -- wire.ExitReport, reported or imported from exit.json
+    exit_json      TEXT,                         -- wire.ExitReport (with output_tail), reported or from exit.json
     issued_at      REAL NOT NULL,
     ended_at       REAL
 );

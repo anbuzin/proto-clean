@@ -22,13 +22,19 @@ def admit_model_call(deps: Deps, request: wire.ModelCallRequest, agent_id: str) 
 
 def commit_step(deps: Deps, request: wire.StepRequest, agent_id: str) -> wire.StepReply:
     """I4. `expected_seq` must be the next seq (else `conflict`); kind rules in
-    `wire.StepRequest`. `model`: the admitted row must exist; usage fills `used_tokens`
-    (NULL stays NULL); calls get rows: `planned`, or `done` with an error result if
-    `error` is set, the tool is not in the spec, or server-tool args do not validate.
+    `wire.StepRequest`; the message row stores `kind`.
+    `model`: the admitted row must exist (exception: the final reply of kind `external`,
+    see `wire.StepRequest`); usage fills `used_tokens` (NULL stays NULL); calls get rows
+    with `ordinal` = list position: `planned`, or `done` with an error result if `error`
+    is set, the tool is not in `spec.tools`, the args are not a JSON object, or
+    server-tool args do not validate. Kind `external`: the only allowed call is one
+    `cli_turn` with safety `unsafe`, whatever `spec.tools` says; for kind `loop`,
+    `cli_turn` is an unknown tool.
+    `tools`: the pending step is the last `model` message; `result_call_ids` must equal
+    its call IDs ordered by `ordinal`.
     If the usage puts the task over budget: the message commits, every planned call
     becomes `done` with error 'budget', the agent fails ('budget'), reply `failed`
-    (terminal) - so no tool of that reply ever starts. `mark_progress`.
-    Kind `external`: `cli_turn` (safety `unsafe`) is accepted as the only call of a step."""
+    (terminal) - so no tool of that reply ever starts. `mark_progress`."""
     raise NotImplementedError
 
 

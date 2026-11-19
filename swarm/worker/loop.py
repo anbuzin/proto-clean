@@ -12,15 +12,17 @@ message is built from `spec.system` and the cache before each model call. Each t
    - `wait`, `blocked`: pending; after a tool in `wire.BARRIER_TOOLS`, start no later call.
    - `stop`: `os._exit(3)`.
    - `run`: set `CallContext`; `async with ai.ToolRunner() as runner:
-     result = await runner.schedule(agent.resolve(call))`; `result.exception` set and
+     result = await runner.schedule(agent.resolve(call))`, where `call` is the original
+     SDK `ToolCallPart` of the committed message and `agent` holds the `ai.AgentTool`s; `result.exception` set and
      safety `unsafe` -> `finish_call(unknown)`; else `finish_call(done)` with
      `result.message.tool_results[0]`'s result and `is_error`.
    Any pending: lease rule (lease.py) around `yield_agent`; `continue` -> step 2 again.
    Else commit kind `tools` with `ai.tool_message(*parts)` and `result_call_ids`.
 3. Last step is a `model` step with no calls: `finish_agent(done, text)`.
 4. Else: `admit_model_call` (estimate from `models.estimate_tokens`); refused -> return.
-   `async with ai.stream(model, [system, *history], tools=..., params=OutputParams(
-   max_tokens=min(spec.max_output_tokens, remaining)))` and drain it fully; then
+   `async with ai.stream(model, [system, *history], tools=[e.tool.tool for e in entries],
+   params=ai.InferenceRequestParams(output=ai.OutputParams(max_tokens=spec.max_output_tokens)))`
+   and drain it fully (the estimate already reserved `max_output_tokens`); then
    `stream.message` and `stream.usage` (None stays None in `wire.Usage`). Commit kind
    `model` with `planned_calls` (I4); state `failed` -> return.
 

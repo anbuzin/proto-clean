@@ -17,6 +17,8 @@ from swarm.wire import EffectClass
 
 @dataclass(frozen=True)
 class Decision:
+    """The server stores the checked input argv (argv[0] a bare name) and `env`; the shim
+    runs `os.execvpe(argv[0], argv, env)`, so PATH lookup uses the PATH in `env`."""
     allowed: bool
     effect_class: EffectClass = "external"   # a cut `external` command blocks the agent (I16)
     reason: str = ""

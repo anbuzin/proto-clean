@@ -26,9 +26,11 @@ def start_call(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: in
     `running` from an older attempt: `idempotent` -> `run` again (runs+1);
     `planned`: one-phase server tool -> run it in this transaction; local tool ->
     `running`, this attempt, runs+1, `run`.
-    Two-phase tool: phase 1 (tx) fence, check access, snapshot what to read or copy;
-    phase 2 (no tx) the file work; phase 3 (tx) fence again, the call is still `planned`,
-    commit the result and the stored reply. A crash between phases commits nothing."""
+    Two-phase tool: the helper gets the full `request` (`processes.process_start`,
+    `processes.process_read`). Phase 1 (tx): stored-reply check, fence, access, snapshot.
+    Phase 2 (no tx): the file work. Phase 3 (tx): stored-reply check again (a retry may
+    have won: return its reply), fence, the call still `planned`; commit the result and
+    the stored reply. A crash between phases commits nothing."""
     raise NotImplementedError
 
 

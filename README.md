@@ -1,10 +1,9 @@
 # Durable swarm prototype
 
-One server owns task state, history, memory, and sandbox copies.
-Workers lease agents over HTTP and can be replaced without losing committed steps.
-The supervisor restarts workers; its runner starts commands in separate shim processes.
-After a crash, safe tool calls can run again. A cut unsafe call waits for an owner decision.
-The server and supervisor do not load the model library; only workers call the model.
+One server owns tasks, history, memory, and sandbox copies. Workers lease agents
+over HTTP and can be replaced without losing committed steps. The supervisor
+restarts workers; its runner starts commands in separate shim processes. A safe
+call can run again after a crash. A cut unsafe call waits for an owner decision.
 
 ## Layout
 
@@ -12,64 +11,77 @@ The server and supervisor do not load the model library; only workers call the m
 |---|---|
 | `swarm/wire.py` | Typed HTTP requests, replies, routes, and replay rules |
 | `swarm/server/` | SQLite state, HTTP API, leases, calls, and sandbox copies |
-| `swarm/client/` | Typed HTTP clients for the owner, worker, runner, and shim |
-| `swarm/worker/` | Lease renewal, model loop, local tools, and external CLI turns |
+| `swarm/server/deps.py`, `swarm/server/writes.py` | Handler dependencies, request replay, and agent write fence |
+| `swarm/server/launches.py` | Launch grants, shim heartbeats, and exit reconciliation |
+| `swarm/client/`, `swarm/owner/` | Typed clients and the owner CLI |
+| `swarm/worker/steps.py` | Durable step writes shared by the model loop and Fx turns |
+| `swarm/worker/` | Model loop, lease renewal, tools, and Fx turns |
 | `swarm/supervisor/` | Worker pool, command runner, and launch shim |
-| `swarm/owner/` | Owner CLI: submit, inspect, resolve, cancel, and manage processes |
-| `tests/e2e/` | Real subprocess tests, with offline models and OS signals |
+| `tests/e2e/` | Real subprocess tests with offline models and OS signals |
 
-## Run an offline task
+## Run a live model
 
-Use Python 3.13 and `uv`. Run each block from this checkout.
+From this checkout, install the locked dependencies with Python 3.13 and `uv`:
 
 ```sh
 uv sync --locked --python 3.13 --exclude-newer-package ai=2026-11-19
 ```
 
-Terminal 1: start the server. Port `0` selects a free loopback port. On restart,
-omit `--port` to reuse the saved port.
+Terminal 1: start the server on loopback. Use a fresh state directory for this
+schema; the prototype does not migrate an older database.
 
 ```sh
-uv run --no-sync python -m swarm.server --state var/hello --port 0
+uv run --no-sync python -m swarm.server --state var/live --port 0
 ```
 
-Terminal 2: start one worker and the command runner. This example uses the test
-model so it needs no model key. A normal worker does not import the test code.
+Terminal 2: set `AI_GATEWAY_API_KEY` in the environment and start a supervisor.
+The server and supervisor do not import the model SDK; the worker reads the key
+and removes it from its environment before running any task.
 
 ```sh
-SWARM_URL=$(uv run --no-sync python -c 'import json; print(json.load(open("var/hello/server.json"))["url"])')
-uv run --no-sync python -m swarm.supervisor --state var/hello --workers 1 \
+uv run --no-sync python -m swarm.supervisor --state var/live --workers 1
+```
+
+Terminal 3: submit a task. The default model is `openai/gpt-5-nano`.
+
+```sh
+uv run --no-sync python -m swarm.owner --state var/live submit --prompt 'Say hello.' --wait --timeout 60
+```
+
+Use `show TASK_ID`, `history AGENT_ID --after-seq N`, or `events --task TASK_ID`
+to inspect state. `log PROCESS_ID` writes bytes; `--json` shows offsets and gaps.
+A remote owner can replace `--state DIR` with `--url URL` and supply only
+`SWARM_OWNER_TOKEN`. On restart, omit `--port` to reuse the saved port. Stop the
+supervisor, then the server, with Ctrl-C; the state directory remains. Workers
+claim only `loop` agents by default; use a worker command with `--kinds external`
+to claim Fx turns on a host with Fx installed.
+
+## Run without a key
+
+In terminal 1, start the server for `var/offline`. In terminal 2, start the same
+supervisor with the test model factory. In terminal 3, use the owner CLI as usual.
+
+```sh
+uv run --no-sync python -m swarm.server --state var/offline --port 0
+```
+
+```sh
+SWARM_URL=$(uv run --no-sync python -c 'import json; print(json.load(open("var/offline/server.json"))["url"])')
+uv run --no-sync python -m swarm.supervisor --state var/offline --workers 1 \
   --worker-command .venv/bin/python -m tests.fakes --server "$SWARM_URL"
 ```
 
-Terminal 3: submit a task and wait for its result. Output is JSON; the root agent
-returns `Hello from the offline model.`
-
 ```sh
-uv run --no-sync python -m swarm.owner --state var/hello submit --prompt 'Say hello.' --wait
+uv run --no-sync python -m swarm.owner --state var/offline submit --prompt 'Say hello.' --wait
 ```
 
-The returned `id` identifies the task. Use `show TASK_ID`, `history AGENT_ID`, or
-`events --task TASK_ID` in place of `submit …` to inspect committed state. Stop the
-supervisor, then the server, with Ctrl-C. The `var/hello` directory retains state.
+The root result is `Hello from the offline model.` No test fixture is in product code.
 
-## Use a live model
-
-Start the supervisor without `--worker-command`, with `AI_GATEWAY_API_KEY` in
-its environment. The worker removes the key from its environment before making
-model calls. Pass `--model MODEL_ID` to `submit` if the default Gateway model is
-not suitable. To submit a full task specification, use `submit --spec FILE.json`.
-
-```sh
-uv run --no-sync python -m swarm.supervisor --state var/hello --workers 1
-```
-
-## Test and read more
+## Tests and limits
 
 ```sh
 uv run --no-sync python -m unittest discover -s tests -t . -v
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for flows and invariants. Read
-[Limits](ARCHITECTURE.md#12-limits) before enabling command tools: the prototype
-handles ordinary crashes but does not confine a command running as your user.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and [Limits](ARCHITECTURE.md#12-limits).
+Read the limits before enabling command tools: the prototype does not confine commands running as your user.

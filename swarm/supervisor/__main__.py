@@ -1,10 +1,11 @@
 """Entry point: `python -m swarm.supervisor --state DIR [--workers N] [--no-runner]
-[-- WORKER_ARGS...]`.
+[--worker-command ARGV...]`.
 
-Reads `server.json` and `tokens.json` from DIR. Runs a `WorkerPool` of N workers
-(`python -m swarm.worker --server URL WORKER_ARGS`, token in `SWARM_WORKER_TOKEN`) and,
-unless `--no-runner`, a `Runner` thread. Holds `DIR/supervisor.lock` (one per state
-directory). SIGTERM: stop the pool and the runner; shims and their payloads stay.
+Reads `server.json` (the URL is stable: see `swarm.server.__main__`) and `tokens.json`.
+Runs a `WorkerPool` of N workers (default command `python -m swarm.worker --server URL`;
+a test gives its own entry script) with `SWARM_WORKER_TOKEN` in their env, and unless
+`--no-runner` a `Runner` thread. Holds `DIR/supervisor.lock`. SIGTERM: stop the pool
+and the runner; shims and payloads stay.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ name = "swarm-clean"
 version = "0.1.0"
 description = "Clean prototype of a client-server agent swarm: a server with no AI owns all state; agents are disposable clients."
 requires-python = ">=3.13"
-dependencies = ["ai==0.10.0"]
+dependencies = ["ai==0.10.0", "pydantic==2.14.3"]  # pydantic: used directly by swarm.wire
 
 [tool.uv]
 package = false

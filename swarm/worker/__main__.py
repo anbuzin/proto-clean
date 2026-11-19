@@ -1,9 +1,10 @@
-"""Entry point: `python -m swarm.worker --server URL [--kinds loop,external]
-[--model-factory MODULE:FUNC] [--tools MODULE:ATTR ...] [--worker-id ID]`.
+"""Entry point: `python -m swarm.worker --server URL [--kinds loop,external] [--tools MODULE:ATTR ...]`.
 
-The worker token comes from the environment variable `SWARM_WORKER_TOKEN`, never argv.
-`--model-factory` defaults to `swarm.worker.models:gateway_model`. `--tools` adds tool
-entries to the registry (custom tools are a normal extension, not a test hook).
+At start the worker reads `SWARM_WORKER_TOKEN` and `AI_GATEWAY_API_KEY` and removes both
+from `os.environ`, so no child (tool, Fx CLI) inherits them. The model factory is given
+at construction: `main(model_factory=...)`; the product passes `models.gateway_model`.
+A test runs its own entry script that calls `main(model_factory=fake)`. `--tools` adds
+custom tool entries (a product extension point).
 """
 
 from __future__ import annotations
@@ -17,14 +18,14 @@ from .tools import Registry
 
 async def run_worker(client: AgentClient, worker_id: str, kinds: list[AgentKind],
                      model_factory: ModelFactory, registry: Registry) -> None:
-    """Forever: claim (long poll); for each claim build a `Lease`, dispatch by
-    `claim.spec.kind` to `loop.run_loop_agent` or `external.run_external_agent`, then
-    close the lease. A `Rejected(stale)` ends the claim, not the worker. Any other error
-    ends the process with exit code 1 (the supervisor starts a new one)."""
+    """Forever: claim (long poll); build a `Lease`; enter `model_factory(claim.spec)`;
+    run `loop.run_loop_agent` or `external.run_external_agent`; close both. `Rejected(stale)`
+    ends the claim, not the worker. Any other error: exit code 1 (the pool starts a new one)."""
     raise NotImplementedError
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, model_factory: ModelFactory | None = None) -> int:
+    """`model_factory` None: `models.gateway_model` with the key read at start."""
     raise NotImplementedError
 
 

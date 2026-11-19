@@ -4,7 +4,9 @@ The runner holds no process state; the server has it. For each `LaunchOrder` it 
 `python -m swarm.supervisor.shim --server URL --launch LAUNCH_ID` in a new session and
 writes the order JSON (with the secret) to the shim's stdin, then closes it. The
 secret is never in argv or env. The runner does not wait for the shim; it reaps exited
-shims only to avoid zombies. If the runner dies, running shims are not affected.
+shims only to avoid zombies. A failed `next_launch` is not retried with the same order:
+the order expires at its grant deadline (`wire.py` replay rules). If the runner dies,
+running shims are not affected.
 """
 
 from __future__ import annotations

@@ -1,20 +1,22 @@
-"""Kind `external` (optional module): one turn of a coding CLI (Fx) through `ai.external`.
+"""Kind `external`: one turn of a coding CLI (Fx) through `ai.external`. Minimal form.
 
-The CLI turn is one local tool call, `cli_turn`, in the normal step protocol, so the
-server needs no special case:
-1. History empty: commit the user message (seq 0), then a synthetic model reply with one
-   tool call `cli_turn` (call ID `turn-1`). Safety from `spec.external.on_cut`:
-   `block` -> `unsafe`, `resume` -> `idempotent`.
-2. `start_call` -> `run`: start `ai.external.Fx(cwd=sandbox, resume=checkpoint session)`;
-   after `session.start()` and before the prompt, `checkpoint_call({session_id})`.
-   Send the prompt (on a resume: "The last turn was cut. Check the sandbox first.").
-   Read events to the end of the turn; `finish_call` with the final text.
-3. Commit the tool message, then a final assistant message with the text; finish `done`.
+The turn is one `unsafe` tool call, `cli_turn` (call ID `turn`), in the normal step
+protocol. The server accepts `cli_turn` only for kind `external`, as the only call.
+1. History empty: commit kind `user` (seq 0).
+2. `admit_model_call` with `spec.external.turn_tokens`; commit kind `model`: a synthetic
+   `ai.assistant_message` with one tool call `cli_turn` (args `{}`).
+3. `start_call` -> `run`: `async with ai.external.Fx(cwd=sandbox, ...) as harness`;
+   `await harness.session.send(ai.user_message(spec.prompt))`; read
+   `harness.session.events()` and stop at the first `ai.events.StreamEnd`;
+   `finish_call(done)` with the final text. Any error: `finish_call(unknown)`.
+   `use` (a turn that finished before a crash): take the stored text.
+4. Commit kind `tools`; then a final `model` step (admitted with 1 token) with the text;
+   `finish_agent(done)`.
 
-A worker kill cuts the turn. `unsafe`: the server makes the call `unknown` and the agent
-waits for the owner. `idempotent`: the next attempt runs the call again and resumes the
-native session in the new sandbox copy. The CLI gets no server tools in this prototype
-(no MCP bridge), and an environment with no model key and no swarm token.
+A worker loss during step 3 leaves the call `running` -> `unknown`: the agent is
+`blocked` until the owner resolves it (I6, I7). No resume, no native store. The CLI
+inherits `os.environ`, from which the worker removed its token and the model key; it
+uses its own Fx login. An Fx process that outlives the worker: "Limits".
 """
 
 from __future__ import annotations
@@ -27,11 +29,4 @@ CLI_TURN = "cli_turn"
 
 
 async def run_external_agent(lease: Lease, claim: wire.Claim) -> None:
-    """Run one claim of kind `external` (steps 1 to 3 above)."""
-    raise NotImplementedError
-
-
-def cli_environment() -> dict[str, str]:
-    """The CLI environment: an allow list (`PATH`, `HOME`, `LANG`, `TERM`), no
-    `AI_GATEWAY_API_KEY`, no `SWARM_*` variable."""
     raise NotImplementedError

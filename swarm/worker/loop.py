@@ -1,41 +1,15 @@
-"""Kind `loop`: the agent loop on the `ai` SDK, one durable step at a time.
+"""Run one agent from its committed history, with no uncommitted tool calls.
 
-The loop is a function of the committed history, so a new worker continues at the same
-point. Memory cache: `claim.memory` (it already has every committed `memory_set`); each
-`memory_set` result, fresh or stored (`use`), is applied to the cache. The system
-message is built from `spec.system` and the cache before each model call. Each turn:
-
-1. History empty: commit kind `user` = `ai.user_message(spec.prompt)` at seq 0.
-2. Last step is a `model` step with calls (the pending step): for each call in order,
-   `start_call`:
-   - `use`: rebuild `ai.tool_result_part` with the call's ID and name and the stored result.
-   - `wait`, `blocked`: pending; after a tool in `wire.BARRIER_TOOLS`, start no later call.
-   - `stop`: `os._exit(3)`.
-   - `run`: set `CallContext`; `async with ai.ToolRunner() as runner:
-     result = await runner.schedule(agent.resolve(call))`, where `call` is the original
-     SDK `ToolCallPart` of the committed message and `agent` holds the `ai.AgentTool`s; `result.exception` set and
-     safety `unsafe` -> `finish_call(unknown)`; else `finish_call(done)` with
-     `result.message.tool_results[0]`'s result and `is_error`.
-   Any pending: lease rule (lease.py) around `yield_agent`; `continue` -> step 2 again.
-   Else commit kind `tools` with `ai.tool_message(*parts)` and `result_call_ids`.
-3. Last step is a `model` step with no calls: `finish_agent(done, text)`.
-4. Else: `admit_model_call` (estimate from `models.estimate_tokens`); refused -> return.
-   `async with ai.stream(model, [system, *history], tools=[e.tool.tool for e in entries],
-   params=ai.InferenceRequestParams(output=ai.OutputParams(max_tokens=spec.max_output_tokens)))`
-   and drain it fully (the estimate already reserved `max_output_tokens`); then
-   `stream.message` and `stream.usage` (None stays None in `wire.Usage`). Commit kind
-   `model` with `planned_calls` (I4); state `failed` -> return.
-
-Not used: `Agent.run` and `ai.durable` - this loop must own the boundary between the
-committed reply and the run grant of each tool. The loop never sets `replay`.
+A model reply commits before any of its tools run (I4). On resume, each call
+uses its stored result or needs a new run grant. Yield at a pending barrier;
+commit the tool message only when all results are ready. Memory augments the
+system message; it does not change the committed history.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 import ai
@@ -43,59 +17,11 @@ from ai.types.messages import Message, ToolCallPart, ToolResultPart
 from pydantic import ValidationError
 
 from swarm import wire
-from swarm.client.api import new_request_id
 
 from .lease import Lease
 from .models import estimate_tokens
-from .tools import CallContext, Registry, ToolEntry, _current
-
-
-@contextmanager
-def _may_release(lease: Lease) -> Iterator[None]:
-    lease.pause()
-    try:
-        yield
-    finally:
-        lease.check()
-
-
-def _commit(lease: Lease, seq: int, kind: wire.StepKind, message: Message, *,
-            calls: list[wire.PlannedCall] | None = None, usage: wire.Usage | None = None) -> wire.StepReply:
-    lease.check()
-    step = wire.StepRequest(
-        attempt=lease.attempt, request_id=new_request_id(), expected_seq=seq,
-        kind=kind, message=message.model_dump(mode="json"), calls=calls or [], usage=usage,
-        result_call_ids=[part.tool_call_id for part in message.tool_results],
-    )
-    if kind != "model":
-        return lease.client.commit_step(lease.agent_id, step, deadline=lease.deadline)
-    with _may_release(lease):
-        reply = lease.client.commit_step(lease.agent_id, step, deadline=lease.deadline)
-    if reply.state == "leased":
-        lease.resume()
-    return reply
-
-
-def _admit(lease: Lease, seq: int, estimate: int) -> bool:
-    with _may_release(lease):
-        reply = lease.client.admit_model_call(lease.agent_id, lease.attempt, seq, estimate, deadline=lease.deadline)
-    if reply.admitted:
-        lease.resume()
-    return reply.admitted
-
-
-def _yield(lease: Lease) -> bool:
-    with _may_release(lease):
-        reply = lease.client.yield_agent(lease.agent_id, lease.attempt, deadline=lease.deadline)
-    if reply.action == "continue":
-        lease.resume()
-        return True
-    return False
-
-
-def _finish(lease: Lease, text: str) -> None:
-    with _may_release(lease):
-        lease.client.finish_agent(lease.agent_id, lease.attempt, "done", text, deadline=lease.deadline)
+from .steps import admit_model, commit_step, finish_agent, yield_agent
+from .tools import CallContext, Registry, ToolEntry, call_context
 
 
 async def run_loop_agent(lease: Lease, claim: wire.Claim, model: ai.Model, registry: Registry) -> None:
@@ -107,31 +33,31 @@ async def run_loop_agent(lease: Lease, claim: wire.Claim, model: ai.Model, regis
     seq = claim.next_seq
     if not history:
         user = ai.user_message(claim.spec.prompt)
-        seq = _commit(lease, seq, "user", user).next_seq
+        seq = commit_step(lease, seq, "user", user).next_seq
         history.append(user)
 
     while True:
         last = history[-1]
         if last.role == "assistant":
             if not last.tool_calls:
-                _finish(lease, last.text)
+                finish_agent(lease, last.text)
                 return
             parts = await run_pending_step(lease, claim, agent, registry, seq - 1, last, memory)
             if parts is None:
-                if not _yield(lease):
+                if not yield_agent(lease):
                     return
                 continue
             message = ai.tool_message(*parts)
-            seq = _commit(lease, seq, "tools", message).next_seq
+            seq = commit_step(lease, seq, "tools", message).next_seq
         else:
             messages = [_system_message(claim.spec.system, memory), *history]
             estimate = estimate_tokens(messages, [entry.tool for entry in entries], claim.spec.max_output_tokens)
-            if not _admit(lease, seq, estimate):
+            if not admit_model(lease, seq, estimate):
                 return
             lease.check()
             message, usage = await _stream_model(model, messages, entries, claim.spec.max_output_tokens)
             calls = planned_calls(message, claim.spec.tools, registry)
-            reply = _commit(lease, seq, "model", message, calls=calls, usage=usage)
+            reply = commit_step(lease, seq, "model", message, calls=calls, usage=usage)
             if reply.state != "leased":
                 return
             seq = reply.next_seq
@@ -193,12 +119,9 @@ async def _run_local(lease: Lease, claim: wire.Claim, agent: ai.Agent, entry: To
                      seq: int, call: ToolCallPart) -> wire.CallResult | None:
     lease.check()
     context = CallContext(Path(claim.sandbox_path), lease.agent_id, lease.attempt, seq, call.tool_call_id)
-    token = _current.set(context)
-    try:
+    with call_context(context):
         async with ai.ToolRunner() as runner:
             output = await runner.schedule(agent.resolve(call))
-    finally:
-        _current.reset(token)
     part = output.message.tool_results[0]
     result = part.model_dump(mode="json")["result"]
     lease.check()

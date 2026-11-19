@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None, *, model_factory: models.ModelFactory | 
         print("Set SWARM_WORKER_TOKEN and use --kinds loop,external or a subset", file=sys.stderr)
         return 1
     try:
-        entries = tools._builtin_entries() + [entry for ref in args.tools for entry in tools.load_entries(ref)]
+        entries = tools.builtin_entries() + [entry for ref in args.tools for entry in tools.load_entries(ref)]
         asyncio.run(run_worker(AgentClient(args.server, token), uuid4().hex, cast(list[AgentKind], kinds),
                                model_factory or models.gateway_model(key), tools.Registry(entries)))
     except KeyboardInterrupt:

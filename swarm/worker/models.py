@@ -21,12 +21,7 @@ ModelFactory = Callable[[TaskSpec], AbstractAsyncContextManager[ai.Model]]
 
 
 def gateway_model(api_key: str) -> ModelFactory:
-    """A factory for `ai.Model(id=spec.model, provider=GatewayProvider(...))`.
-    Import `ai.providers.ai_gateway.GatewayProvider`; pass `api_key_value=api_key`,
-    `base_url_env=None`; inject an `httpx2.AsyncClient(transport=AsyncHTTPTransport(
-    retries=0, trust_env=False), trust_env=False, follow_redirects=False)` through
-    `provider._set_http_client` (as `proto/agent/live.py` does: no proxy from the
-    environment, no transport retry). The context closes the provider, then the client."""
+    """Do not use a proxy or retry transport: a retry needs a new admission (I11)."""
     @asynccontextmanager
     async def open_model(spec: TaskSpec) -> AsyncIterator[ai.Model]:
         if not api_key:

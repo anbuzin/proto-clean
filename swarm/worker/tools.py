@@ -42,6 +42,16 @@ class CallContext:
 _current: contextvars.ContextVar[CallContext] = contextvars.ContextVar("swarm_call")
 
 
+@contextmanager
+def call_context(context: CallContext) -> Iterator[None]:
+    """Expose the current sandbox to the scheduled tool only."""
+    token = _current.set(context)
+    try:
+        yield
+    finally:
+        _current.reset(token)
+
+
 def current_call() -> CallContext:
     """Set by the loop before `ToolRunner.schedule`; the scheduled task copies the context."""
     return _current.get()
@@ -178,10 +188,11 @@ def server_stubs() -> list[ToolEntry]:
 
 def builtin_registry() -> Registry:
     """The three file tools (`idempotent`) and the server stubs."""
-    return Registry(_builtin_entries())
+    return Registry(builtin_entries())
 
 
-def _builtin_entries() -> list[ToolEntry]:
+def builtin_entries() -> list[ToolEntry]:
+    """Return the built-in entries before custom tools are added."""
     return [ToolEntry(tool, "idempotent") for tool in (read_file, write_file, list_files)] + server_stubs()
 
 

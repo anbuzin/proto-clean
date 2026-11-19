@@ -3,6 +3,7 @@
 import signal
 from pathlib import Path
 
+from swarm.client import Rejected
 from tests.fakes import call
 from tests.helpers import SwarmTest, matching_pids, send
 
@@ -71,3 +72,25 @@ class TaskTest(SwarmTest):
         self.assertNotIn(second.pid, workers)
         release.touch()
         self.finished(task)
+
+    def test_t6_owner_resolves_cut_unsafe_call_but_not_after_cancel(self) -> None:
+        task, _ = self.interrupted_task("unsafe_wait_for_release")
+        cancelled = self.submit("work", "unsafe_wait_for_release")
+        self.start_supervisor(workers=2)
+        first = [self.running_call(task_id, "gate") for task_id in (task, cancelled)]
+        for agent in first:
+            send(agent.attempts[0].pid, signal.SIGKILL)
+        blocked = [self.until(lambda: self.root_agent(task_id), lambda agent: agent.state == "blocked")
+                   for task_id in (task, cancelled)]
+        for agent in blocked:
+            self.assertEqual([(c.state, c.runs) for c in agent.calls], [("unknown", 1)])
+        self.owner.cancel_task(cancelled)
+        with self.assertRaises(Rejected) as refusal:
+            self.owner.resolve_call(blocked[1].id, 1, "gate", "too late")
+        self.assertEqual(refusal.exception.status, 409)
+        reply = self.owner.resolve_call(blocked[0].id, 1, "gate", "owner verified the effect")
+        self.assertEqual(reply.state, "done")
+        agent = self.finished(task)
+        self.assertEqual(agent.attempt, 2)
+        self.assertEqual(agent.calls[0].runs, 1)
+        self.assertEqual(agent.calls[0].outcome.result, "owner verified the effect")

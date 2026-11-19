@@ -155,4 +155,3 @@ class ServerHarness(unittest.TestCase):
             seq += 1
             self.model_step(claim, [], seq=seq)
         self.write("finish_agent", claim, status="done", result="ok")
-

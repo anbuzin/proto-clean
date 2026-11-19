@@ -94,3 +94,29 @@ class TaskTest(SwarmTest):
         self.assertEqual(agent.attempt, 2)
         self.assertEqual(agent.calls[0].runs, 1)
         self.assertEqual(agent.calls[0].outcome.result, "owner verified the effect")
+
+    def test_t8_both_children_read_the_pinned_parent_copy(self) -> None:
+        self.set_scripts({
+            "parent": [[
+                call("write_file", "seed", path="seed.txt", content="pinned seed"),
+                call("run_child", "left", prompt="left child", tools=["read_file"]),
+                call("run_child", "right", prompt="right child", tools=["read_file"]),
+            ], "done"],
+            "left child": [[call("read_file", "left-read", path="seed.txt")], "left done"],
+            "right child": [[call("read_file", "right-read", path="seed.txt")], "right done"],
+        })
+        self.start_server()
+        self.start_supervisor(workers=2)
+        task = self.submit("parent", "write_file", "run_child", "read_file")
+        parent = self.finished(task)
+        self.assertEqual([a.end_reason for a in parent.attempts], ["yielded", "finished"])
+        self.assertEqual(self.owner.history(parent.id).messages[2].attempt, 2)
+        children = {agent.id: agent for agent in self.owner.get_task(task).agents if agent.parent_id == parent.id}
+        self.assertEqual(len(children), 2)
+        for child_call in parent.calls[1:]:
+            child = children[child_call.child_agent_id]
+            self.assertEqual((child.state, child.result), ("done", f"{child_call.call_id} done"))
+            self.assertEqual(child.calls[0].outcome.result, "pinned seed")
+            self.assertEqual(child_call.outcome.result, {"agent_id": child.id, "status": "done", "result": child.result})
+        copies = [a.sandbox_path for a in parent.attempts] + [a.attempts[0].sandbox_path for a in children.values()]
+        self.assertEqual(len(set(copies)), 4)

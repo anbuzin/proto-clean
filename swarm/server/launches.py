@@ -1,4 +1,4 @@
-"""Launch grants, shim receipts and recovery for process records."""
+"""Launch grants, shim reports and recovery for process records."""
 from __future__ import annotations
 
 import hashlib
@@ -27,7 +27,8 @@ def next_launch(deps: Deps, request: wire.NextLaunchRequest) -> wire.LaunchOrder
     """Long-poll for the oldest request and issue a launch with a secret and deadline."""
     def issue() -> wire.LaunchOrder | None:
         with deps.store.write() as tx:
-            row = tx.one("SELECT * FROM processes WHERE state='requested' AND desired='running' ORDER BY created_at, id LIMIT 1")
+            row = tx.one("SELECT * FROM processes WHERE state='requested' AND desired='running' "
+                         "ORDER BY created_at, id LIMIT 1")
             if row is None:
                 return None
             launch_id, secret = new_id("launch"), secrets.token_urlsafe(32)
@@ -134,7 +135,7 @@ def _apply_exit(tx: Tx, deps: Deps, launch: dict, request: wire.ExitReport) -> w
 
 
 def report_exit(deps: Deps, request: wire.ExitReport, launch_id: str) -> wire.Ack:
-    """Apply a denial or granted exit; replay only an identical receipt.
+    """Apply a denial or granted exit; replay only an identical report.
 
     A current denial retries or ends the process. A granted exit ends the process
     and fills its waiter. A late denial never changes a noncurrent process.
@@ -151,24 +152,24 @@ def _revoke(tx: Tx, deps: Deps, launch: dict) -> None:
 
 
 def expire_launches(deps: Deps) -> None:
-    """Revoke expired grants and reconcile silent shims from receipts or unknown.
+    """Revoke expired grants and reconcile silent shims from reports or unknown.
 
     An issued launch retries until the try limit. A granted launch is never retried;
-    without a valid receipt its final log size comes from the file.
+    without a valid report its final log size comes from the file.
     """
     with deps.store.write() as tx:
         for launch in tx.all("SELECT * FROM launches WHERE state='issued' AND grant_deadline<=?", tx.mono):
             _revoke(tx, deps, launch)
         silent = tx.all("""SELECT l.*, p.log_path FROM launches l JOIN processes p ON p.id=l.process_id
                            WHERE l.state='granted' AND l.heartbeat_mono<=?""", tx.mono - deps.config.shim_silence_s)
-    # Read receipts and log sizes without holding a database transaction.
-    for snapshot in silent:
-        log = Path(snapshot["log_path"])
-        receipt = None
+    # A shim may recover during file I/O; recheck its heartbeat before reconciling.
+    for candidate in silent:
+        log = Path(candidate["log_path"])
+        report = None
         try:
-            receipt = wire.ExitReport.model_validate_json(log.with_name("exit.json").read_text())
-            if not receipt.started:
-                receipt = None
+            report = wire.ExitReport.model_validate_json(log.with_name("exit.json").read_text())
+            if not report.started:
+                report = None
         except (OSError, ValueError):
             pass
         try:
@@ -176,14 +177,14 @@ def expire_launches(deps: Deps) -> None:
         except OSError:
             size = 0
         with deps.store.write() as tx:
-            launch = tx.one("SELECT * FROM launches WHERE id=?", snapshot["id"])
-            if not launch or launch["state"] != "granted" or launch["heartbeat_mono"] != snapshot["heartbeat_mono"]:
+            launch = tx.one("SELECT * FROM launches WHERE id=?", candidate["id"])
+            if not launch or launch["state"] != "granted" or launch["heartbeat_mono"] != candidate["heartbeat_mono"]:
                 continue
             row = tx.require("SELECT * FROM processes WHERE id=?", launch["process_id"])
             if row["current_launch"] != launch["id"]:
                 continue
-            if receipt is not None:
-                _apply_exit(tx, deps, launch, receipt)
+            if report is not None:
+                _apply_exit(tx, deps, launch, report)
             else:
                 tx.run("UPDATE launches SET state='ended', ended_at=? WHERE id=?", tx.now, launch["id"])
                 tx.run("UPDATE processes SET state='ended', outcome='unknown', log_bytes=?, ended_at=? WHERE id=?",
@@ -197,8 +198,10 @@ def enforce_lifetimes(deps: Deps) -> None:
     with deps.store.write() as tx:
         rows = tx.all("SELECT * FROM processes WHERE desired='stopped' AND state IN ('requested', 'launching')")
         for row in rows:
-            tx.run("UPDATE launches SET state='revoked', ended_at=? WHERE id=? AND state='issued'", tx.now, row["current_launch"])
-            tx.run("UPDATE processes SET state='ended', outcome='not_started', ended_at=? WHERE id=?", tx.now, row["id"])
+            tx.run("UPDATE launches SET state='revoked', ended_at=? WHERE id=? AND state='issued'",
+                   tx.now, row["current_launch"])
+            tx.run("UPDATE processes SET state='ended', outcome='not_started', ended_at=? WHERE id=?",
+                   tx.now, row["id"])
             tx.event(row["task_id"], row["agent_id"], "process_ended", process_id=row["id"], outcome="not_started")
             on_process_end(tx, row["id"])
 

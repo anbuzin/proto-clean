@@ -44,7 +44,7 @@ AttemptEnd = Literal["yielded", "finished", "lost", "server_restart", "cancelled
 EffectClass = Literal["local", "external"]
 Lifetime = Literal["command", "agent", "task"]   # `command`: a run_command process
 StopReason = Literal["agent", "owner", "timeout", "agent_ended", "task_ended", "cancelled"]
-# A stop that the agent did not choose. With outcome `unknown` it is a cut (I16).
+# Cuts are unknown outcomes or owner/cancel stops after grant (I16).
 CUT_STOP_REASONS: frozenset[str] = frozenset({"owner", "cancelled"})
 StepKind = Literal["user", "model", "tools"]
 ProcessState = Literal["requested", "launching", "running", "ended", "failed"]
@@ -54,7 +54,7 @@ ProcessOutcome = Literal["not_started", "exited", "signaled", "unknown"]
 SERVER_TOOLS: frozenset[str] = frozenset({
     "memory_set", "run_child", "run_command", "process_start", "process_read", "process_stop",
 })
-# Server tools with file I/O run in two phases: check and snapshot in one transaction,
+# Server tools with file I/O check access in one transaction,
 # file work with no transaction open, then fence again and commit (calls.start_call).
 TWO_PHASE_TOOLS: frozenset[str] = frozenset({"process_start", "process_read"})
 # A barrier tool stops the step: the worker starts no later call of the same step until
@@ -533,7 +533,8 @@ ROUTES: tuple[Route, ...] = (
     # Runner (runner token) and shim (single-use launch secret)
     Route("next_launch", "POST", "/v1/runner/launches", "runner", NextLaunchRequest, LaunchOrder),
     Route("grant_launch", "POST", "/v1/launches/{launch_id}/grant", "launch", GrantRequest, GrantReply),
-    Route("launch_heartbeat", "POST", "/v1/launches/{launch_id}/heartbeat", "launch", LaunchHeartbeat, LaunchHeartbeatReply),
+    Route("launch_heartbeat", "POST", "/v1/launches/{launch_id}/heartbeat", "launch",
+          LaunchHeartbeat, LaunchHeartbeatReply),
     Route("report_exit", "POST", "/v1/launches/{launch_id}/exit", "launch", ExitReport, Ack),
 )
 

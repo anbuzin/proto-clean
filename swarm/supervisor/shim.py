@@ -181,7 +181,7 @@ def _save_exit_report(process_dir: Path, report: wire.ExitReport) -> None:
 
 def run_shim(order: wire.LaunchOrder, client: LaunchClient, process_dir: str) -> int:
     """Steps 1 to 6 after stdin is read. `process_dir` is the parent of `order.log_path`;
-    the receipt is `process_dir/exit.json`. Returns 0."""
+    save the final exit report to `process_dir/exit.json`."""
     deadline = time.monotonic() + order.grant_deadline_s
     with open(os.devnull, "rb") as null:
         os.dup2(null.fileno(), 0)

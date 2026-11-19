@@ -8,9 +8,9 @@ from collections.abc import Callable
 from swarm import wire
 
 from . import leases, processes, tasks
-from .errors import ApiError
 from .deps import Deps
-from .store import Tx, json_text
+from .errors import ApiError
+from .store import Tx
 from .writes import Reply, fence, mark_progress
 
 # One-phase server tool: runs inside the start transaction.
@@ -25,17 +25,12 @@ def server_tools() -> dict[str, ServerTool]:
 
 
 def start_call(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int, call_id: str) -> wire.CallStartReply:
-    """I5. Fence; the call must be in the pending step. By state:
-    `done` -> `use`; `unknown` -> `blocked`; `waiting` -> `wait`;
-    `running` with this attempt -> `stop` (second start of one grant: the worker exits);
-    `running` from an older attempt: `idempotent` -> `run` again (runs+1);
-    `planned`: one-phase server tool -> run it in this transaction; local tool ->
-    `running`, this attempt, runs+1, `run`.
-    Two-phase tool: the helper gets the full `request` (`processes.process_start`,
-    `processes.process_read`). Phase 1 (tx): stored-reply check, fence, access, snapshot.
-    Phase 2 (no tx): the file work. Phase 3 (tx): stored-reply check again (a retry may
-    have won: return its reply), fence, the call still `planned`; commit the result and
-    the stored reply. A crash between phases commits nothing."""
+    """Start one tool call or return its existing decision (I5).
+
+    Only an idempotent local call can run again after an attempt ends. A server
+    tool commits with its reply unless it needs file I/O; those tools check the
+    fence before and after their file work.
+    """
     # Only choose a handler here; each handler checks replay and the fence in its write transaction.
     with deps.store.read() as tx:
         row = tx.one("SELECT tool FROM calls WHERE agent_id=? AND step_seq=? AND call_id=?",
@@ -89,12 +84,14 @@ def resolve_call(deps: Deps, request: wire.ResolveCall, agent_id: str, step_seq:
         call = _call(tx, agent_id, step_seq, call_id)
         if agent["state"] in wire.TERMINAL_AGENT_STATES or call.state != "unknown":
             raise ApiError("conflict", "call is not unresolved on an open agent")
-        _set_result(tx, call, wire.CallResult(result=request.result, is_error=request.is_error), task_id=agent["task_id"])
+        outcome = wire.CallResult(result=request.result, is_error=request.is_error)
+        _set_result(tx, call, outcome, task_id=agent["task_id"])
         leases.settle(tx, agent_id)
         return key.save(tx, deps, _call(tx, agent_id, step_seq, call_id))
 
 
-def fill_call(tx: Tx, agent_id: str, step_seq: int, call_id: str, result: wire.CallResult, *, unknown: bool = False) -> None:
+def fill_call(tx: Tx, agent_id: str, step_seq: int, call_id: str, result: wire.CallResult,
+              *, unknown: bool = False) -> None:
     """A `waiting` call becomes `done` (or `unknown`). If the agent has no lease,
     `settle` it; if it is leased, nothing more (its `yield` sees the call done)."""
     call = _call(tx, agent_id, step_seq, call_id)
@@ -109,9 +106,8 @@ def fill_call(tx: Tx, agent_id: str, step_seq: int, call_id: str, result: wire.C
 def view(row: dict) -> wire.CallView:
     """Convert a stored call row to its public view."""
     outcome = row["result_json"]
-    return wire.CallView(**{key: value for key, value in row.items() if key not in {"args_json", "result_json", "ordinal"}},
-                         args=json.loads(row["args_json"]), outcome=json.loads(outcome) if outcome is not None else None)
-
+    fields = {key: row[key] for key in wire.CallView.model_fields if key in row}
+    return wire.CallView(**fields, args=json.loads(row["args_json"]), outcome=json.loads(outcome) if outcome else None)
 
 
 def pending(tx: Tx, agent_id: str) -> list[wire.CallView]:
@@ -163,7 +159,8 @@ def wait(tx: Tx, call: wire.CallView, *, child_agent_id: str | None = None,
 
 
 def _call(tx: Tx, agent_id: str, step_seq: int, call_id: str) -> wire.CallView:
-    return view(tx.require("SELECT * FROM calls WHERE agent_id=? AND step_seq=? AND call_id=?", agent_id, step_seq, call_id))
+    return view(tx.require("SELECT * FROM calls WHERE agent_id=? AND step_seq=? AND call_id=?",
+                           agent_id, step_seq, call_id))
 
 
 def _start_action(call: wire.CallView, attempt: int) -> wire.CallStartReply | None:

@@ -1,8 +1,4 @@
-"""The model seam: the worker gets its model from a `ModelFactory` given at construction.
-
-The product factory is `gateway_model`. A test gives a factory that returns
-`ai.testing.FakeModel`; no scenario code is in the product.
-"""
+"""A model factory owns the provider and transport for one claim."""
 
 from __future__ import annotations
 

@@ -16,6 +16,8 @@ class StandIn:
 
     def grant(self, pid: int, *, deadline: float) -> wire.GrantReply:
         first_try = not (self.directory / "pid").exists()
+        if not first_try:
+            assert (self.directory / "pid").read_text() == str(pid)
         (self.directory / "pid").write_text(str(pid))
         assert deadline > time.monotonic()
         assert not (self.directory / "ran").exists()

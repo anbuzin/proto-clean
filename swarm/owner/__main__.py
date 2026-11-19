@@ -1,5 +1,7 @@
 """Owner CLI: use a local state directory, or a server URL and an owner token."""
 
+from __future__ import annotations
+
 import argparse
 import base64
 import json
@@ -10,7 +12,7 @@ import sys
 from pathlib import Path
 
 from swarm import wire
-from swarm.client import OwnerClient, Rejected, TaskWaitTimeout, Unreachable
+from swarm.client import OwnerClient, Rejected, Unreachable
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -112,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             print(reply.model_dump_json())
     except KeyboardInterrupt:
         return 130
-    except (OSError, KeyError, ValueError, Rejected, Unreachable, TaskWaitTimeout) as error:
+    except (OSError, KeyError, ValueError, Rejected, Unreachable) as error:
         logging.getLogger(__name__).error("%s", error)
         return 1
     return 0

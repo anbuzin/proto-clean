@@ -1,5 +1,7 @@
 """Agent writes that can release the lease; renew only when the lease remains open."""
 
+from __future__ import annotations
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -21,7 +23,7 @@ def _may_release(lease: Lease) -> Iterator[None]:
 
 
 def commit_step(lease: Lease, seq: int, kind: wire.StepKind, message: Message, *,
-            calls: list[wire.PlannedCall] | None = None, usage: wire.Usage | None = None) -> wire.StepReply:
+                calls: list[wire.PlannedCall] | None = None, usage: wire.Usage | None = None) -> wire.StepReply:
     """Commit the message and its ordered calls or results."""
     lease.check()
     step = wire.StepRequest(

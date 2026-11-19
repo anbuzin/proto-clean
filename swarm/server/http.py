@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import logging
 import os
 import re
@@ -75,6 +74,9 @@ def make_http_server(deps: Deps) -> ThreadingHTTPServer:
     class RequestHandler(BaseHTTPRequestHandler):
         timeout = 10
 
+        def log_message(self, format: str, *args: object) -> None:
+            logging.getLogger(__name__).debug("%s: %s", self.address_string(), format % args)
+
         def do_GET(self) -> None:
             self.dispatch()
 
@@ -138,7 +140,8 @@ def make_http_server(deps: Deps) -> ThreadingHTTPServer:
                 self.error_reply("internal", "internal server error")
 
         def error_reply(self, kind: str, detail: str) -> None:
-            self.respond(wire.ERROR_STATUS.get(kind, 500), wire.ErrorReply(error=kind, detail=detail).model_dump_json().encode())
+            error = wire.ErrorReply(error=kind, detail=detail)
+            self.respond(wire.ERROR_STATUS.get(kind, 500), error.model_dump_json().encode())
 
         def respond(self, status: int, payload: bytes) -> None:
             self.send_response(status)

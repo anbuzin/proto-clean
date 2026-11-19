@@ -1,5 +1,7 @@
 """Read stored replies before fencing agent writes (I2, I3)."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Self
 

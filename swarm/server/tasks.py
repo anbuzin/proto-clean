@@ -8,8 +8,8 @@ from pathlib import Path
 from swarm import wire
 
 from . import calls, leases
-from .errors import ApiError
 from .deps import Deps
+from .errors import ApiError
 from .store import Tx, json_text, new_id
 from .writes import Reply
 
@@ -159,7 +159,8 @@ def end_agent(tx: Tx, agent_id: str, state: wire.AgentState, *, result: wire.JSO
     agent = tx.require("SELECT * FROM agents WHERE id=?", agent_id)
     if agent["state"] in wire.TERMINAL_AGENT_STATES:
         return
-    tx.run("UPDATE agents SET state=?, result_json=?, fail_reason=? WHERE id=?", state, json_text(result), reason, agent_id)
+    tx.run("UPDATE agents SET state=?, result_json=?, fail_reason=? WHERE id=?",
+           state, json_text(result), reason, agent_id)
     if agent["lease_until"] is not None:
         leases.end_attempt(tx, agent_id, agent["attempt"], "cancelled" if reason == "cancelled" else "finished")
     tx.event(agent["task_id"], agent_id, "agent_ended", state=state, reason=reason)
@@ -188,8 +189,8 @@ def memory(tx: Tx, agent_id: str) -> dict[str, str]:
 def _create_agent(tx: Tx, task_id: str, agent_id: str, spec: wire.TaskSpec, *,
                   parent: dict | None = None, call: wire.CallView | None = None) -> None:
     parent_id = parent["id"] if parent else None
-    tx.run("INSERT INTO agents(id, task_id, parent_id, parent_step_seq, parent_call_id, seed_agent_id, seed_attempt, depth, "
-           "kind, spec_json, state, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
+    tx.run("INSERT INTO agents(id, task_id, parent_id, parent_step_seq, parent_call_id, seed_agent_id, "
+           "seed_attempt, depth, kind, spec_json, state, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
            agent_id, task_id, parent_id, call.step_seq if call else None, call.call_id if call else None, parent_id,
            parent["attempt"] if parent else None, parent["depth"] + 1 if parent else 0,
            spec.kind, spec.model_dump_json(), tx.now)

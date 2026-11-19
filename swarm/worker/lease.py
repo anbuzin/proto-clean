@@ -1,16 +1,8 @@
-"""The lease of one claim, as the worker sees it (I15).
+"""Keep a local deadline ahead of the server's lease expiry (I15).
 
-Before any work, one heartbeat must succeed. Local deadline = send time of the last
-acknowledged heartbeat + TTL (worker `time.monotonic()`); an ack that arrives after the
-deadline does not count. The server's lease ends later (it starts at receive time), so a
-running worker stops first. The thread renews every TTL/3 with a 1 s timeout. A `stale`
-reply or a passed deadline: `os._exit(3)`, with no cleanup that could write.
-
-Rule for calls that can release the lease (`admit_model_call`, `commit_step` of kind
-`model`, `yield_agent`, `finish_agent`): `pause()` first; make the call with
-`deadline=lease.deadline`; if the reply keeps the lease (`admitted`, step state
-`leased`, `continue`) `resume()`; else return from the claim. Thus a late heartbeat
-never runs against a released lease.
+An acknowledged heartbeat sets the deadline from its send time, not its
+arrival. Before a write that can release the lease, pause renewal; resume only
+when the reply keeps the lease. A late reply cannot revive an expired lease.
 """
 
 from __future__ import annotations

@@ -44,7 +44,9 @@ class Server:
                     json.dump(tokens, file)
                 temporary.replace(token_path)
             tokens = json.loads(token_path.read_text())
-            if set(tokens) != {"owner", "worker", "runner"} or any(not isinstance(v, str) or not v for v in tokens.values()):
+            if set(tokens) != {"owner", "worker", "runner"} or not all(
+                isinstance(value, str) and value for value in tokens.values()
+            ):
                 raise ValueError("invalid tokens.json")
             port = self.config.port
             server_path = self.config.state_dir / "server.json"

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import ai
 from ai.testing import FakeModel
@@ -268,3 +270,19 @@ class WorkerLoopTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.log, [("start", "turn"), ("commit", "tools", 2),
                                           ("commit", "model", 3), ("finish",)])
             self.assertEqual(client.result, "saved result")
+
+    async def test_missing_fx_completes_the_unsafe_call_with_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as sandbox, patch.dict(os.environ, {"PATH": sandbox}):
+            client = MemoryClient(sandbox, tools=[])
+            client.spec = client.spec.model_copy(update={"kind": "external"})
+            claim = client.make_claim()
+            lease = Lease(client, claim)
+            lease.start()
+            try:
+                await run_external_agent(lease, claim)
+            finally:
+                lease.close()
+            self.assertIn(("finish_call", "turn", "done"), client.log)
+            result, = Message.model_validate(client.history[2].message).tool_results
+            self.assertTrue(result.is_error)
+            self.assertIn("fx", result.result)

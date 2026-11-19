@@ -1,5 +1,7 @@
 """Dependencies shared by route handlers."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from .config import ServerConfig
@@ -9,7 +11,7 @@ from .store import Store
 
 @dataclass(frozen=True)
 class Deps:
-    """Dependencies shared by route handlers."""
+    """Shared server state plus the per-request launch secret, when present."""
     store: Store
     config: ServerConfig
     policy: CommandPolicy

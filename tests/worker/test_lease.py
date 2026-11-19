@@ -72,3 +72,20 @@ raise AssertionError('late reply extended the old deadline')
         child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5)
         self.assertEqual(child.returncode, 3, child.stderr)
         self.assertIn("local deadline passed", child.stderr)
+
+    def test_initial_renewal_retries_transport_failure(self) -> None:
+        setup = CHILD.split('lease = Lease(Client(), claim)', 1)[0]
+        script = setup + """
+class DropsFirstReply(Client):
+    def heartbeat(self, agent_id, attempt, timeout_s):
+        if self.calls == 0:
+            self.calls += 1
+            raise Unreachable('first response lost')
+        return wire.HeartbeatReply(lease_until=0)
+
+lease = Lease(DropsFirstReply(), claim.model_copy(update={'lease_ttl_s': 2}))
+lease.start()
+lease.close()
+"""
+        child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5)
+        self.assertEqual(child.returncode, 0, child.stderr)

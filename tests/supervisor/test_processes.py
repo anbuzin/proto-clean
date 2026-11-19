@@ -150,6 +150,8 @@ class RunnerTests(unittest.TestCase):
 
         class StandIn:
             def next_launch(self, runner_id: str, wait_s: float) -> None:
+                if wait_s != 10:
+                    raise AssertionError(f"expected a 10 s poll, got {wait_s}")
                 calls.append(time.monotonic())
                 if len(calls) == 1:
                     raise Unreachable()

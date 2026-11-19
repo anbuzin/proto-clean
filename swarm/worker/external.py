@@ -1,23 +1,7 @@
-"""Kind `external`: one turn of a coding CLI (Fx) through `ai.external`. Minimal form.
+"""Run one Fx turn through the durable step protocol as an unsafe `cli_turn`.
 
-The turn is one `unsafe` tool call, `cli_turn` (call ID `turn`), in the normal step
-protocol. The server accepts `cli_turn` only for kind `external`, as the only call.
-1. History empty: commit kind `user` (seq 0).
-2. `admit_model_call` with `spec.external.turn_tokens`; commit kind `model`: a synthetic
-   `ai.assistant_message` with one tool call `cli_turn` (args `{}`).
-3. `start_call` -> `run`: open one Fx session in the sandbox;
-   send the prompt and read its events through the first `StreamEnd`;
-   `finish_call(done)` with the final text. A start refusal is a tool error; a cut turn becomes `unknown`.
-   `use` (a turn that finished before a crash): take the stored text.
-4. Commit kind `tools`; then the final `model` step with the text, with no admission
-   (`wire.StepRequest`); `finish_agent(done)`.
-Each claim resumes from the last committed step: it does only the steps above that are
-not in `claim.history` yet (a `use` of a finished `cli_turn` skips the CLI).
-
-A worker loss during step 3 leaves the call `running` -> `unknown`: the agent is
-`blocked` until the owner resolves it (I6, I7). No resume, no native store. The CLI
-inherits `os.environ`, from which the worker removed its token and the model key; it
-uses its own Fx login. An Fx process that outlives the worker: "Limits".
+A stored call result skips Fx on resume. An interrupted turn instead waits for
+an owner decision (I6, I7). Fx uses its own login and may outlive its worker.
 """
 
 from __future__ import annotations

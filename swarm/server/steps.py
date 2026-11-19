@@ -11,8 +11,8 @@ from pydantic import ValidationError
 from swarm import wire
 
 from . import calls, leases, tasks
-from .errors import ApiError
 from .deps import Deps
+from .errors import ApiError
 from .store import Tx, json_text
 from .writes import Reply, fence, mark_progress
 

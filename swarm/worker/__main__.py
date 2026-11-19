@@ -5,6 +5,8 @@ from `os.environ` so tools cannot inherit them. `main(model_factory=...)` select
 provider; `--tools` loads local extensions.
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import logging

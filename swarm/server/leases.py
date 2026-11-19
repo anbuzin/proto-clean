@@ -1,4 +1,4 @@
-"""Leases: claim, heartbeat, the fence, attempt ends, strikes, `settle`, recovery.
+"""Claim and renew leases; settle agents after their attempts end.
 
 `settle` and `end_attempt` implement the state table in ARCHITECTURE.md section 7.
 """
@@ -19,22 +19,13 @@ from .writes import fence
 
 
 def claim(deps: Deps, request: wire.ClaimRequest) -> wire.Claim | None:
-    """Long poll for at most `wait_s`. Replay of a known request ID: find its reserved
-    attempt (`attempts.claim_request`) first. Ended (clone failure, expiry, restart):
-    `ApiError('stale')`, and the worker starts a new claim with a new request ID. Still
-    cloning at the end of `wait_s`: `ApiError('busy')` (503; the client retries the same
-    ID). Ready and current: the stored claim.
-    1. Reserve, one transaction: oldest `ready` agent with `ready_at <= now`, a kind in
-       `kinds`, and, if the agent has no ready copy yet and is a child, its seed attempt
-       ended. `attempt += 1`,
-       `leased`, `lease_until = mono + clone_ttl_s`, attempts row with `claim_request`,
-       `sandboxes.reserve`, stored reply NULL - all in this transaction (I3, I8).
-    2. `sandboxes.materialize` with no transaction open.
-    3. Publish, one transaction: `fence` for that attempt (else drop the work: `stale`
-       for a retry); `mark_ready`; `lease_until = mono + lease_ttl_s`; store the reply.
-       A clone error instead: attempt `setup_failed`, `clone_tries += 1`; at
-       `max_clone_tries` the agent fails ('sandbox'); else `ready`. No strike.
-    Nothing ready by the end of `wait_s`: None (204)."""
+    """Claim the oldest eligible agent or replay the same claim (I3, I8).
+
+    Reserve in SQLite before copying. Copy without a transaction; publish only
+    while fenced. A retry of a reservation waits for the copy, then gets the
+    stored reply or `stale` if the attempt ended. A copy still in progress at the
+    poll deadline returns `busy`; an idle poll returns None.
+    """
     scope = f"worker:{request.worker_id}"
     digest = fingerprint("claim", {}, request.model_dump(mode="json"))
 
@@ -102,8 +93,8 @@ def _record_loss(tx: Tx, config: ServerConfig, agent_id: str, attempt: int, stat
     if not lost["activated"]:
         return state
     # A converted unsafe call was still running when this attempt was lost.
-    running = tx.one("SELECT 1 FROM calls WHERE agent_id=? AND attempt=? AND state IN ('running', 'unknown')",
-                     agent_id, attempt)
+    running = tx.one("SELECT 1 FROM calls WHERE agent_id=? AND attempt=? AND "
+                     "(state='running' OR (state='unknown' AND safety='unsafe'))", agent_id, attempt)
     prior = tx.require("SELECT strikes FROM agents WHERE id=?", agent_id)["strikes"]
     strikes = prior + 1 if not lost["progress"] or running is not None else 0
     delay = min(config.backoff_base_s * 2 ** (strikes - 1), config.backoff_max_s) if strikes else 0

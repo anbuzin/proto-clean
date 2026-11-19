@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import threading
 from pathlib import Path
@@ -12,6 +13,7 @@ from .config import ServerConfig
 
 def main(argv: list[str] | None = None) -> int:
     """Parse options, start the server, and stop it on a signal."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--host", default="127.0.0.1")

@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     activated     INTEGER NOT NULL DEFAULT 0,    -- 1 after the first heartbeat; a never-activated loss is no strike
     started_at    REAL NOT NULL,
     ended_at      REAL,
-    end_reason    TEXT CHECK (end_reason IN ('yielded', 'finished', 'lost', 'server_restart', 'cancelled', 'setup_failed')),
+    end_reason    TEXT CHECK (end_reason IN (
+        'yielded', 'finished', 'lost', 'server_restart', 'cancelled', 'setup_failed')),
     progress      INTEGER NOT NULL DEFAULT 0,    -- 1 after the first committed step or call result
     sandbox_path  TEXT NOT NULL,
     sandbox_state TEXT NOT NULL CHECK (sandbox_state IN ('cloning', 'ready')),

@@ -138,7 +138,8 @@ class OwnerClient:
         query = wire.HistoryQuery(after_seq=after_seq, limit=limit)
         return cast(wire.HistoryPage, self._http.call("get_history", query, agent_id=agent_id))
 
-    def events(self, task_id: str | None = None, after: int = 0, limit: int = 200, wait_s: float = 0) -> wire.EventsPage:
+    def events(self, task_id: str | None = None, after: int = 0,
+               limit: int = 200, wait_s: float = 0) -> wire.EventsPage:
         """Read or long poll a page of events."""
         query = wire.EventsQuery(task_id=task_id, after=after, limit=limit, wait_s=wait_s)
         return cast(wire.EventsPage, self._http.call("list_events", query))
@@ -188,7 +189,6 @@ class OwnerClient:
         raise TaskWaitTimeout(f"Timed out waiting for task {task_id}")
 
 
-
 class AgentClient:
     """Calls of one worker. Each write makes one request ID and keeps it across retries."""
 
@@ -206,17 +206,20 @@ class AgentClient:
         return cast(wire.HeartbeatReply, self._http.call("heartbeat", wire.Heartbeat(attempt=attempt),
                                                         agent_id=agent_id, timeout_s=timeout_s, retry=False))
 
-    def admit_model_call(self, agent_id: str, attempt: int, step_seq: int, estimated_tokens: int, *, deadline: float) -> wire.ModelCallReply:
+    def admit_model_call(self, agent_id: str, attempt: int, step_seq: int, estimated_tokens: int,
+                         *, deadline: float) -> wire.ModelCallReply:
         """Reserve budget before starting a model call."""
         body = wire.ModelCallRequest(attempt=attempt, request_id=new_request_id(), step_seq=step_seq,
                                      estimated_tokens=estimated_tokens)
-        return cast(wire.ModelCallReply, self._http.call("admit_model_call", body, deadline=deadline, agent_id=agent_id))
+        return cast(wire.ModelCallReply, self._http.call("admit_model_call", body,
+                                                        deadline=deadline, agent_id=agent_id))
 
     def commit_step(self, agent_id: str, step: wire.StepRequest, *, deadline: float) -> wire.StepReply:
         """`step` already carries the attempt and the request ID."""
         return cast(wire.StepReply, self._http.call("commit_step", step, deadline=deadline, agent_id=agent_id))
 
-    def start_call(self, agent_id: str, attempt: int, step_seq: int, call_id: str, *, deadline: float) -> wire.CallStartReply:
+    def start_call(self, agent_id: str, attempt: int, step_seq: int, call_id: str,
+                   *, deadline: float) -> wire.CallStartReply:
         """Ask for permission to run a call or use its stored outcome."""
         body = wire.AgentWrite(attempt=attempt, request_id=new_request_id())
         return cast(wire.CallStartReply, self._http.call("start_call", body, deadline=deadline, agent_id=agent_id,
@@ -235,7 +238,8 @@ class AgentClient:
         body = wire.AgentWrite(attempt=attempt, request_id=new_request_id())
         return cast(wire.YieldReply, self._http.call("yield_agent", body, deadline=deadline, agent_id=agent_id))
 
-    def finish_agent(self, agent_id: str, attempt: int, status: str, result: wire.JSON, *, deadline: float) -> wire.AgentStateReply:
+    def finish_agent(self, agent_id: str, attempt: int, status: str, result: wire.JSON,
+                     *, deadline: float) -> wire.AgentStateReply:
         """Commit the final agent state and result."""
         body = wire.FinishRequest(attempt=attempt, request_id=new_request_id(), status=status, result=result)
         return cast(wire.AgentStateReply, self._http.call("finish_agent", body, deadline=deadline, agent_id=agent_id))
@@ -263,7 +267,8 @@ class LaunchClient:
         return cast(wire.GrantReply, self._http.call("grant_launch", wire.GrantRequest(pid=pid),
                                                     deadline=deadline, launch_id=self._launch_id))
 
-    def heartbeat(self, log_bytes: int, truncated_bytes: int, timeout_s: float = 0.5) -> wire.LaunchHeartbeatReply | None:
+    def heartbeat(self, log_bytes: int, truncated_bytes: int,
+                  timeout_s: float = 0.5) -> wire.LaunchHeartbeatReply | None:
         """One try; None on any transport error (the shim's loop goes on)."""
         body = wire.LaunchHeartbeat(log_bytes=log_bytes, truncated_bytes=truncated_bytes)
         try:
@@ -273,5 +278,5 @@ class LaunchClient:
             return None
 
     def report_exit(self, report: wire.ExitReport, *, deadline: float) -> wire.Ack:
-        """Report the exit, retrying the same receipt."""
+        """Report the exit, retrying the same exit report."""
         return cast(wire.Ack, self._http.call("report_exit", report, deadline=deadline, launch_id=self._launch_id))

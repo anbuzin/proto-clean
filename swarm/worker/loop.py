@@ -1,4 +1,4 @@
-"""Run one agent from its committed history, with no uncommitted tool calls.
+"""Run one agent from its committed history, without running uncommitted tool calls.
 
 A model reply commits before any of its tools run (I4). On resume, each call
 uses its stored result or needs a new run grant. Yield at a pending barrier;
@@ -84,7 +84,7 @@ async def _stream_model(model: ai.Model, messages: list[Message], entries: list[
 
 async def run_pending_step(lease: Lease, claim: wire.Claim, agent: ai.Agent, registry: Registry,
                            step_seq: int, message: ai.types.messages.Message,
-                           memory: dict[str, str]) -> list | None:
+                           memory: dict[str, str]) -> list[ToolResultPart] | None:
     """Step 2. The tool result parts, or None if the step is pending."""
     parts: list[ToolResultPart] = []
     for call in message.tool_calls:
@@ -132,7 +132,7 @@ async def _run_local(lease: Lease, claim: wire.Claim, agent: ai.Agent, entry: To
     return saved.outcome if saved.state == "done" else None
 
 
-def planned_calls(message: ai.types.messages.Message, spec_tools: list[str], registry: Registry) -> list[wire.PlannedCall]:
+def planned_calls(message: Message, spec_tools: list[str], registry: Registry) -> list[wire.PlannedCall]:
     """One `PlannedCall` per tool call, in order. `error` set when the tool is not in the
     spec or the registry, or `tool_args` is not a JSON object; safety from the registry
     (`server` when `error` is set)."""

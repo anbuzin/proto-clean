@@ -36,6 +36,7 @@ class Rejected(Exception):
 
     @property
     def stale(self) -> bool:
+        """Whether the server says the attempt is no longer current."""
         return self.reply.error == "stale"
 
 
@@ -49,7 +50,8 @@ def new_request_id() -> str:
 
 
 class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        """Do not forward bearer tokens to a redirected URL."""
         return None
 
 
@@ -98,7 +100,7 @@ class HttpClient:
                     if error.code != 503 or not retry:
                         try:
                             refusal = wire.ErrorReply.model_validate_json(error.read())
-                        except ValueError:
+                        except (ValueError, OSError, http.client.HTTPException):
                             refusal = wire.ErrorReply(error="internal", detail=str(error.reason))
                         raise Rejected(error.code, refusal) from error
                 last_error = error

@@ -32,9 +32,10 @@ class AllowList:
 
     def check(self, argv: list[str], private_dir: Path) -> Decision:
         """Return a decision for a checked command."""
-        if not argv or not isinstance(argv[0], str) or not argv[0] or "/" in argv[0] or argv[0] in (".", "..") or argv[0] not in self.programs:
+        program = argv[0] if argv else ""
+        if not _bare_name(program) or program not in self.programs:
             return Decision(False, reason="program is not allowed")
-        return Decision(True, self.programs[argv[0]], env={
+        return Decision(True, self.programs[program], env={
             "PATH": self.path, "LANG": "C.UTF-8", "HOME": str(private_dir / "home"),
             "TMPDIR": str(private_dir / "tmp"),
         })
@@ -52,6 +53,10 @@ def load_policy(path: Path) -> AllowList:
     if not isinstance(data, dict) or set(data) != {"programs"} or not isinstance(data["programs"], dict):
         raise ValueError("policy must contain a programs object")
     programs = data["programs"]
-    if any(not isinstance(k, str) or not k or "/" in k or k in (".", "..") or v not in ("local", "external") for k, v in programs.items()):
+    if any(not _bare_name(name) or kind not in ("local", "external") for name, kind in programs.items()):
         raise ValueError("invalid policy program or effect class")
     return AllowList(programs)
+
+
+def _bare_name(program: str) -> bool:
+    return bool(program) and "/" not in program and program not in (".", "..")

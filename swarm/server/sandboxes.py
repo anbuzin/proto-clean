@@ -39,12 +39,9 @@ def reserve(tx: Tx, sandboxes_dir: Path, agent: dict, attempt: int) -> tuple[Pat
 
 
 def materialize(source: Path | None, target: Path) -> None:
-    """Clone `source` to `target`, or make an empty directory. A partial `target` from an
-    earlier try is removed first. Raises `OSError` on failure (the claim handles it)."""
+    """Create a fresh copy; a failed attempt never reuses its path (I8)."""
     if source is not None and target.resolve().is_relative_to(source.resolve()):
         raise OSError(errno.EINVAL, "copy destination is inside source", str(target))
-    if target.exists():
-        shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     if source is None:
         target.mkdir(mode=0o700)

@@ -72,10 +72,6 @@ class Server:
             self.stop()
             raise
 
-    def serve_forever(self) -> None:
-        """Wait for the server to stop."""
-        self._stop.wait()
-
     def stop(self) -> None:
         """Stop the HTTP server and reaper, then release the lock."""
         self._stop.set()

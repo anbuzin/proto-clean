@@ -157,11 +157,6 @@ class Store:
                 if self._version == version and not self._closed:
                     self._changed.wait(min(remaining, 0.25))
 
-    def wait_for_change(self, timeout_s: float) -> None:
-        """Wait for a write or timeout; this is only a hint."""
-        with self._changed:
-            self._changed.wait(max(0, timeout_s))
-
     def close(self) -> None:
         """Wake and end long polls during shutdown."""
         with self._changed:
@@ -177,6 +172,3 @@ def fingerprint(route: str, path: dict[str, Any], body: dict[str, JSON]) -> str:
 def new_id(prefix: str) -> str:
     """Return a random prefixed identifier."""
     return f"{prefix}_{secrets.token_hex(16)}"
-
-
-Clock = Callable[[], float]

@@ -37,7 +37,7 @@ class ServerHarness(unittest.TestCase):
             "policy_path=Path(sys.argv[3]) if sys.argv[3] else None, "
             "lease_ttl_s=1.5, reaper_interval_s=0.05, backoff_base_s=0.05, "
             "backoff_max_s=0.1, grant_deadline_s=0.5, shim_silence_s=5); "
-            "s=Server(c); s.start(); s.serve_forever()"
+            "from threading import Event; s=Server(c); s.start(); Event().wait()"
         )
         first = not (self.state / "server.json").exists()
         if cli:

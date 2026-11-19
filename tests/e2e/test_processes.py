@@ -1,6 +1,7 @@
 """Run real payloads through the runner and launch shim."""
 
 import base64
+import json
 import signal
 from pathlib import Path
 
@@ -95,3 +96,40 @@ class ProcessTest(SwarmTest):
         self.assertEqual((ended.id, ended.outcome, ended.signal), (process.id, "signaled", signal.SIGTERM))
         grants = [event for event in self.owner.events(task).events if event.type == "launch_granted"]
         self.assertEqual(len(grants), 1)
+
+    def test_t13_shim_loss_uses_receipt_or_reports_unknown(self) -> None:
+        policy = self.state / "policy.json"
+        policy.write_text(json.dumps({"programs": {"python3": "local", "sh": "external"}}))
+        releases = {name: self.state / f"release-{name}" for name in ("local", "external", "receipt")}
+        self.set_scripts({name: [[
+            call("run_command", "command", argv=self.command(release, external=name == "external"), timeout_s=45),
+        ], "done"] for name, release in releases.items()})
+        server = self.start_server(policy=policy)
+        self.start_supervisor()
+        tasks = {name: self.submit(name, "run_command") for name in releases}
+        procs = {name: self.process(task, "running") for name, task in tasks.items()}
+        for name in ("local", "external"):
+            shim, payload = self.launch_pids(tasks[name], procs[name].id)
+            self.addCleanup(send, payload, signal.SIGKILL)
+            send(shim, signal.SIGKILL)
+            send(payload, signal.SIGKILL)
+        proc = procs["receipt"]
+        shim, _ = self.launch_pids(tasks["receipt"], proc.id)
+        receipt = self.state / "processes" / proc.id / "exit.json"
+        # Stop HTTP consumption, not the payload. The real shim writes the receipt.
+        send(server.pid, signal.SIGSTOP)
+        try:
+            releases["receipt"].touch()
+            self.until(receipt.exists, timeout=5)
+            send(shim, signal.SIGKILL)
+        finally:
+            send(server.pid, signal.SIGCONT)
+        for name in ("local", "external"):
+            self.assertEqual(self.process(tasks[name], "ended").outcome, "unknown")
+        local = self.finished(tasks["local"])
+        self.assertEqual(wire.CommandResult.model_validate(local.calls[0].outcome.result).outcome, "interrupted")
+        external = self.until(lambda: self.root_agent(tasks["external"]), lambda a: a.state == "blocked")
+        self.assertEqual(external.calls[0].state, "unknown")
+        recovered = self.finished(tasks["receipt"])
+        result = wire.CommandResult.model_validate(recovered.calls[0].outcome.result)
+        self.assertEqual((result.outcome, result.exit_code, result.output_tail), ("exited", 7, "first\nsecond\n"))

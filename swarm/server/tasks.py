@@ -131,7 +131,9 @@ def on_agent_terminal(tx: Tx, agent_id: str) -> None:
     agent = tx.require("SELECT * FROM agents WHERE id=?", agent_id)
     if agent["parent_id"]:
         step, call_id = agent["parent_call"].split(":", 1)
-        result = dict(agent_id=agent_id, status=agent["state"], result=_agent_result(agent))
+        value = _agent_result(agent)
+        result = dict(agent_id=agent_id, status=agent["state"],
+                      result=agent["fail_reason"] if value is None else value)
         calls.fill_call(tx, agent["parent_id"], int(step), call_id,
                         wire.CallResult(result=result, is_error=agent["state"] == "failed"))
     _stop_processes(tx, "agent_id", agent_id, "agent_ended", ("agent", "command"))
@@ -148,8 +150,6 @@ def on_agent_terminal(tx: Tx, agent_id: str) -> None:
 def child_spec(parent: wire.TaskSpec, args: wire.RunChildArgs) -> wire.TaskSpec:
     """Same model, kind, system, max_output_tokens, budget (shared by the task); prompt
     and tools from `args`; no memory; no workspace (the seed is the pinned parent copy)."""
-    raise NotImplementedError
-
     return parent.model_copy(update={"prompt": args.prompt, "tools": parent.tools if args.tools is None else args.tools,
                                      "workspace": None, "memory": {}})
 

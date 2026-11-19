@@ -147,8 +147,12 @@ def recover_after_restart(deps: Deps) -> int:
     """Startup: each open attempt -> `end_attempt('server_restart')` (also a claim whose
     copy was not ready; its partial directory stays unused)."""
     with deps.store.write() as tx:
-        agents = tx.all("SELECT id, attempt FROM agents WHERE state='leased'")
+        agents = tx.all("SELECT a.id, a.attempt, t.activated FROM agents a JOIN attempts t "
+                        "ON t.agent_id=a.id AND t.attempt=a.attempt WHERE a.state='leased'")
         for agent in agents:
+            # I8: an activated worker can still write until its local lease deadline (I15).
+            if agent["activated"]:
+                tx.run("UPDATE agents SET ready_at=? WHERE id=?", tx.now + deps.config.lease_ttl_s, agent["id"])
             end_attempt(tx, agent["id"], agent["attempt"], "server_restart")
         return len(agents)
 
@@ -167,9 +171,10 @@ def _reserve(tx: Tx, deps: Deps, request: wire.ClaimRequest, scope: str, digest:
     kinds = ",".join("?" for _ in request.kinds)
     agent = tx.one(f"""SELECT a.* FROM agents a WHERE a.state='ready' AND a.ready_at<=?
         AND a.kind IN ({kinds}) AND (a.seed_agent_id IS NULL OR EXISTS (
-            SELECT 1 FROM attempts seed WHERE seed.agent_id=a.seed_agent_id
-            AND seed.attempt=a.seed_attempt AND seed.ended_at IS NOT NULL
-        )) ORDER BY a.created_at, a.id LIMIT 1""", tx.now, *request.kinds)
+            SELECT 1 FROM attempts seed JOIN agents parent ON parent.id=seed.agent_id
+            WHERE seed.agent_id=a.seed_agent_id AND seed.attempt=a.seed_attempt AND seed.ended_at IS NOT NULL
+            AND (seed.end_reason!='server_restart' OR parent.ready_at<=?)
+        )) ORDER BY a.created_at, a.id LIMIT 1""", tx.now, *request.kinds, tx.now)
     if agent is None:
         return None
     agent_id, attempt = agent["id"], agent["attempt"] + 1

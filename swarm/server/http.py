@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import re
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,7 +72,13 @@ def make_http_server(deps: Deps) -> ThreadingHTTPServer:
     """Create a threaded server with the configured dependencies."""
     routes = handlers()
 
+    class ConnectionServer(ThreadingHTTPServer):
+        # I1: finish open requests before the state-directory lock is released.
+        daemon_threads = False
+
     class RequestHandler(BaseHTTPRequestHandler):
+        timeout = 10
+
         def do_GET(self) -> None:
             self.dispatch()
 
@@ -95,7 +102,7 @@ def make_http_server(deps: Deps) -> ThreadingHTTPServer:
                 secret = auth[7:] if auth.startswith("Bearer ") else None
                 if route.auth not in ("none", "launch"):
                     expected = deps.tokens[route.auth]
-                    if secret is None or not hmac.compare_digest(secret, expected):
+                    if secret is None or not hmac.compare_digest(secret.encode(), expected.encode()):
                         raise ApiError("unauthorized")
                 request_deps = replace(deps, launch_secret=secret) if route.auth == "launch" else deps
                 request = None
@@ -120,8 +127,16 @@ def make_http_server(deps: Deps) -> ThreadingHTTPServer:
                 else:
                     payload = route.reply.model_validate(result).model_dump_json().encode()
                     self.respond(200, payload)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
             except ApiError as exc:
                 self.error_reply(exc.kind, exc.detail)
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode & 0xff in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    self.error_reply("busy", "database busy")
+                else:
+                    logging.exception("HTTP database operation failed")
+                    self.error_reply("internal", "internal server error")
             except Exception:
                 logging.exception("HTTP request failed")
                 self.error_reply("internal", "internal server error")
@@ -137,4 +152,4 @@ def make_http_server(deps: Deps) -> ThreadingHTTPServer:
             if self.command != "HEAD":
                 self.wfile.write(payload)
 
-    return ThreadingHTTPServer((deps.config.host, deps.config.port or 0), RequestHandler)
+    return ConnectionServer((deps.config.host, deps.config.port or 0), RequestHandler)

@@ -21,7 +21,7 @@ from .store import Store
 
 class Server:
     def __init__(self, config: ServerConfig) -> None:
-        self.config = config
+        self.config = replace(config, state_dir=config.state_dir.resolve())
         self.deps: Deps
         self.url: str
         self._lock = None
@@ -32,16 +32,18 @@ class Server:
 
     def start(self) -> None:
         """Recover state and start HTTP and reaper threads before returning."""
-        self.config.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._lock = (self.config.state_dir / "server.lock").open("a+")
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             token_path = self.config.tokens_path
             if not token_path.exists():
                 tokens = {name: secrets.token_urlsafe(32) for name in ("owner", "worker", "runner")}
-                fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                temporary = token_path.with_suffix(".json.tmp")
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "w") as file:
                     json.dump(tokens, file)
+                temporary.replace(token_path)
             tokens = json.loads(token_path.read_text())
             if set(tokens) != {"owner", "worker", "runner"} or any(not isinstance(v, str) or not v for v in tokens.values()):
                 raise ValueError("invalid tokens.json")
@@ -78,6 +80,8 @@ class Server:
     def stop(self) -> None:
         """Stop the HTTP server and reaper, then release the lock."""
         self._stop.set()
+        if hasattr(self, "deps"):
+            self.deps.store.close()
         if self._http is not None:
             if self._http_thread is not None:
                 self._http.shutdown()
@@ -88,8 +92,6 @@ class Server:
         if self._reaper is not None:
             self._reaper.join()
             self._reaper = None
-        if hasattr(self, "deps"):
-            self.deps.store.close()
         if self._lock is not None:
             self._lock.close()
             self._lock = None

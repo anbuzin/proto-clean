@@ -66,6 +66,7 @@ class Store:
         self.db_path = Path(db_path)
         self._changed = threading.Condition()
         self._version = 0
+        self._closed = False
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None)
@@ -143,6 +144,8 @@ class Store:
         deadline = time.monotonic() + max(0, timeout_s)
         while True:
             with self._changed:
+                if self._closed:
+                    return None
                 version = self._version
             result = attempt()
             if result is not None:
@@ -151,7 +154,7 @@ class Store:
             if remaining <= 0:
                 return None
             with self._changed:
-                if self._version == version:
+                if self._version == version and not self._closed:
                     self._changed.wait(min(remaining, 0.25))
 
     def wait_for_change(self, timeout_s: float) -> None:
@@ -160,7 +163,10 @@ class Store:
             self._changed.wait(max(0, timeout_s))
 
     def close(self) -> None:
-        """Close the store; connections are closed at each transaction boundary."""
+        """Wake and end long polls during shutdown."""
+        with self._changed:
+            self._closed = True
+            self._changed.notify_all()
 
 
 def fingerprint(route: str, path: dict[str, Any], body: dict[str, JSON]) -> str:

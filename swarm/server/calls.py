@@ -36,26 +36,26 @@ def start_call(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: in
     Phase 2 (no tx): the file work. Phase 3 (tx): stored-reply check again (a retry may
     have won: return its reply), fence, the call still `planned`; commit the result and
     the stored reply. A crash between phases commits nothing."""
+    # Only choose a handler here; each handler checks replay and the fence in its write transaction.
+    with deps.store.read() as tx:
+        row = tx.one("SELECT tool FROM calls WHERE agent_id=? AND step_seq=? AND call_id=?",
+                     agent_id, step_seq, call_id)
+    if row and row["tool"] in wire.TWO_PHASE_TOOLS:
+        handler = processes.process_start if row["tool"] == "process_start" else processes.process_read
+        return handler(deps, request, agent_id, step_seq, call_id)
     with deps.store.write() as tx:
         agent, call, reply = start_context(tx, deps, request, agent_id, step_seq, call_id)
         if reply is not None:
             return save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
-        if call.safety != "server":
-            tx.run("UPDATE calls SET state='running', attempt=?, runs=runs+1 WHERE agent_id=? AND step_seq=? AND call_id=?",
-                   request.attempt, agent_id, step_seq, call_id)
+        if call.safety == "server":
+            args = wire.SERVER_TOOL_ARGS[call.tool].model_validate(call.args)
+            reply = server_tools()[call.tool](tx, deps, agent, call, args)
+        else:
+            tx.run("UPDATE calls SET state='running', attempt=?, runs=runs+1 "
+                   "WHERE agent_id=? AND step_seq=? AND call_id=?", request.attempt, agent_id, step_seq, call_id)
             tx.event(agent["task_id"], agent_id, "call_started", step_seq=step_seq, call_id=call_id)
             reply = wire.CallStartReply(action="run")
-        else:
-            args = wire.SERVER_TOOL_ARGS[call.tool].model_validate(call.args)
-            if call.tool in wire.TWO_PHASE_TOOLS:
-                reply = None
-            else:
-                reply = server_tools()[call.tool](tx, deps, agent, call, args)
-        if reply is not None:
-            return save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
-    if call.tool == "process_start":
-        return processes.process_start(deps, request, agent_id, step_seq, call_id, args)
-    return processes.process_read(deps, request, agent_id, step_seq, call_id, args)
+        return save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
 
 
 def finish_call(deps: Deps, request: wire.CallFinish, agent_id: str, step_seq: int, call_id: str) -> wire.CallView:

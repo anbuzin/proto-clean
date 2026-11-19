@@ -14,7 +14,8 @@ from swarm import wire
 from . import calls, sandboxes
 from .deps import Deps
 from .policy import Decision
-from .store import Tx, fingerprint, json_text, new_id
+from .store import Tx, json_text, new_id
+from .writes import Reply
 
 
 def _view(row: dict) -> wire.ProcessView:
@@ -64,7 +65,7 @@ def run_command(tx: Tx, deps: Deps, agent: dict, call: wire.CallView,
 
 
 def process_start(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int,
-                  call_id: str, args: wire.ProcessStartArgs) -> wire.CallStartReply:
+                  call_id: str) -> wire.CallStartReply:
     """Clone the attempt and request a background process in two phases.
 
     Policy refusal or clone failure completes the call with an error. Each try uses a
@@ -74,6 +75,7 @@ def process_start(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq:
         agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
         if reply is not None:
             return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+        args = wire.ProcessStartArgs.model_validate(call.args)
         process_id = new_id("proc")
         decision = _decision(deps, process_id, args.argv)
         if not decision.allowed:
@@ -103,7 +105,7 @@ def _same_task(tx: Tx, agent: dict, process_id: str) -> dict | None:
 
 
 def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: int,
-                 call_id: str, args: wire.ProcessReadArgs) -> wire.CallStartReply:
+                 call_id: str) -> wire.CallStartReply:
     """Read a same-task process log outside the transaction and complete after a second fence.
 
     The first transaction snapshots the process state and final log size. A missing or
@@ -113,6 +115,7 @@ def process_read(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq: 
         agent, call, reply = calls.start_context(tx, deps, request, agent_id, step_seq, call_id)
         if reply is not None:
             return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
+        args = wire.ProcessReadArgs.model_validate(call.args)
         row = _same_task(tx, agent, args.process_id)
         if row is None:
             reply = _error(tx, call, "process not found or inaccessible")
@@ -216,13 +219,10 @@ def read_log(deps: Deps, request: wire.LogQuery, process_id: str) -> wire.LogChu
 
 def stop_process(deps: Deps, request: wire.OwnerWrite, process_id: str) -> wire.ProcessView:
     """Request an owner stop and store the reply for replay."""
-    fp = fingerprint("stop_process", {"process_id": process_id}, request.model_dump(mode="json"))
+    key = Reply.for_request("stop_process", request, process_id=process_id)
     with deps.store.write() as tx:
-        stored = deps.store.stored_reply(tx, "owner", request.request_id, fp)
-        if stored is not None:
-            return wire.ProcessView.model_validate(stored.reply)
+        if replay := key.read(tx, deps):
+            return replay
         row = tx.require("SELECT * FROM processes WHERE id=?", process_id)
         _stop(tx, row, "owner")
-        reply = _view(tx.require("SELECT * FROM processes WHERE id=?", process_id))
-        deps.store.save_reply(tx, "owner", request.request_id, fp, reply.model_dump(mode="json"))
-        return reply
+        return key.save(tx, deps, _view(tx.require("SELECT * FROM processes WHERE id=?", process_id)))

@@ -1,12 +1,7 @@
-"""Runner: takes launch orders from the server and starts one shim for each.
+"""Start one shim per launch order; keep its secret on stdin and reap its exit.
 
-The runner holds no process state; the server has it. For each `LaunchOrder` it starts
-`python -m swarm.supervisor.shim --server URL --launch LAUNCH_ID` in a new session and
-writes the order JSON (with the secret) to the shim's stdin, then closes it. The
-secret is never in argv or env. The runner does not wait for the shim; it reaps exited
-shims only to avoid zombies. A failed `next_launch` is not retried with the same order:
-the order expires at its grant deadline (`wire.py` replay rules). If the runner dies,
-running shims are not affected.
+The runner starts no payload itself. If it loses an order, the server revokes
+that order at its deadline. Shims outlive the runner.
 """
 
 from __future__ import annotations
@@ -15,8 +10,8 @@ import logging
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from queue import Empty, Queue
+from threading import Event, Thread
 
 from swarm import wire
 from swarm.client import Rejected, RunnerClient, Unreachable
@@ -59,32 +54,47 @@ class Runner:
         is down.
         """
         backoff = 0.5
-        with ThreadPoolExecutor(max_workers=1) as polls:
+        while not stop.is_set():
+            replies: Queue[wire.LaunchOrder | None | Exception] = Queue()
+            # A long poll must not hold up shim reaping or supervisor shutdown.
+            Thread(target=self._poll, args=(replies,), daemon=True).start()
             while not stop.is_set():
-                poll = polls.submit(self._client.next_launch, self._runner_id, wait_s=1)
-                while not poll.done() and not stop.is_set():
-                    self._reap()
-                    stop.wait(0.2)
-                if stop.is_set():
-                    break
-                try:
-                    order = poll.result()
-                except (Rejected, Unreachable) as error:
-                    logger.warning("Launch poll failed: %s", error)
-                    self._wait(stop, backoff)
-                    backoff = min(backoff * 2, 10)
-                    continue
-                backoff = 0.5
-                if order is not None:
-                    try:
-                        self.launch(order)
-                    except OSError:
-                        pass
                 self._reap()
+                try:
+                    order = replies.get(timeout=0.2)
+                    break
+                except Empty:
+                    continue
+            if stop.is_set():
+                break
+            if isinstance(order, (Rejected, Unreachable)):
+                logger.warning("Launch poll failed: %s", order)
+                self._wait(stop, backoff)
+                backoff = min(backoff * 2, 10)
+                continue
+            if isinstance(order, Exception):
+                raise order
+            backoff = 0.5
+            if order is not None:
+                try:
+                    self.launch(order)
+                except OSError:
+                    pass
         self._reap()
 
+    def _poll(self, replies: Queue[wire.LaunchOrder | None | Exception]) -> None:
+        try:
+            replies.put(self._client.next_launch(self._runner_id, wait_s=10))
+        except Exception as error:
+            replies.put(error)
+
     def _reap(self) -> None:
-        self._shims = [shim for shim in self._shims if shim.poll() is None]
+        for shim in self._shims[:]:
+            status = shim.poll()
+            if status is not None:
+                self._shims.remove(shim)
+                log = logger.warning if status else logger.info
+                log("Shim %d exited with status %d", shim.pid, status)
 
     def _wait(self, stop: Event, delay: float) -> None:
         deadline = time.monotonic() + delay

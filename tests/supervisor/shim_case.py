@@ -15,9 +15,12 @@ class StandIn:
         self.mode = mode
 
     def grant(self, pid: int, *, deadline: float) -> wire.GrantReply:
+        first_try = not (self.directory / "pid").exists()
         (self.directory / "pid").write_text(str(pid))
         assert deadline > time.monotonic()
         assert not (self.directory / "ran").exists()
+        if self.mode == "lost_grant" and first_try:
+            raise Unreachable("grant reply lost")
         return wire.GrantReply(granted=self.mode != "deny")
 
     def heartbeat(self, log_bytes: int, truncated_bytes: int,

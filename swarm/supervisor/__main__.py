@@ -10,7 +10,6 @@ and the runner; shims and payloads stay.
 
 from __future__ import annotations
 
-
 import argparse
 import fcntl
 import json
@@ -37,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.workers < 0 or args.worker_command == []:
         parser.error("--workers must be nonnegative and --worker-command must not be empty")
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     try:
         with (args.state / "supervisor.lock").open("a") as lock:
             try:

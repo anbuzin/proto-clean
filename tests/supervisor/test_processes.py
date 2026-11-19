@@ -76,6 +76,10 @@ sys.exit(7)
         self.assertEqual((self.directory / "log").read_bytes(), b"out\0err\xff")
         self.assertEqual(report, wire.ExitReport(exit_code=7, log_bytes=8, output_tail="out\0err\ufffd"))
 
+    def test_grant_replay_releases_the_same_held_child(self) -> None:
+        report = self.run_shim("print('ran')", mode="lost_grant")
+        self.assertEqual(report.output_tail, "ran\n")
+
     def test_log_cap_counts_dropped_bytes_and_tails_the_log(self) -> None:
         report = self.run_shim("import sys; sys.stdout.buffer.write(b'A' * 1000 + b'B' * 70000)", cap=5000)
         self.assertEqual((self.directory / "log").read_bytes(), b"A" * 1000 + b"B" * 4000)

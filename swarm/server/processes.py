@@ -23,15 +23,15 @@ def _view(row: dict) -> wire.ProcessView:
     return wire.ProcessView(**fields, argv=json.loads(row["argv_json"]))
 
 
-def _record(tx: Tx, deps: Deps, agent: dict, call: wire.CallView, process_id: str,
+def _record(tx: Tx, deps: Deps, agent: dict, process_id: str,
             argv: list[str], decision: Decision, cwd: str, lifetime: str, timeout: float | None) -> None:
     log = deps.config.processes_dir / process_id / "log"
     tx.run("""INSERT INTO processes
-        (id, task_id, agent_id, call_ref, argv_json, env_json, cwd, effect_class,
+        (id, task_id, agent_id, argv_json, env_json, cwd, effect_class,
          lifetime, timeout_s, desired, state, log_path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'requested', ?, ?)""",
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'requested', ?, ?)""",
         process_id, agent["task_id"], agent["id"],
-        f"{call.agent_id}:{call.step_seq}:{call.call_id}", json_text(argv),
+        json_text(argv),
         json_text(decision.env), cwd, decision.effect_class, lifetime, timeout, str(log), tx.now)
     tx.event(agent["task_id"], agent["id"], "process_requested", process_id=process_id)
 
@@ -59,7 +59,7 @@ def run_command(tx: Tx, deps: Deps, agent: dict, call: wire.CallView,
     decision = _decision(deps, process_id, args.argv)
     if not decision.allowed:
         return _error(tx, call, decision.reason)
-    _record(tx, deps, agent, call, process_id, args.argv, decision,
+    _record(tx, deps, agent, process_id, args.argv, decision,
             _attempt_path(tx, agent), "command", args.timeout_s)
     return calls.wait(tx, call, process_id=process_id)
 
@@ -95,7 +95,7 @@ def process_start(deps: Deps, request: wire.AgentWrite, agent_id: str, step_seq:
         if error is not None:
             reply = _error(tx, call, error)
         else:
-            _record(tx, deps, agent, call, process_id, args.argv, decision, str(work), args.lifetime, None)
+            _record(tx, deps, agent, process_id, args.argv, decision, str(work), args.lifetime, None)
             reply = calls.complete(tx, call, wire.CallResult(result={"process_id": process_id}))
         return calls.save_start(tx, deps, request, agent_id, step_seq, call_id, reply)
 

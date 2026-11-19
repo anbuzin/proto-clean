@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS agents (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL REFERENCES tasks(id),
     parent_id       TEXT REFERENCES agents(id),
-    parent_call     TEXT,                        -- "<step_seq>:<call_id>" of the parent's run_child call
+    parent_step_seq INTEGER,
+    parent_call_id  TEXT,                        -- identity of the parent's run_child call
     seed_agent_id   TEXT REFERENCES agents(id),  -- child: the parent; its sandbox copy seeds the child
     seed_attempt    INTEGER,                     -- child: the parent attempt that made the call (pinned)
     depth           INTEGER NOT NULL DEFAULT 0,
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS agents (
     strikes         INTEGER NOT NULL DEFAULT 0,
     ready_at        REAL NOT NULL DEFAULT 0,     -- backoff after a strike
     result_json     TEXT,
-    fail_reason     TEXT,                        -- poison | budget | cancelled | ancestor_failed | sandbox | worker text
+    fail_reason     TEXT,                        -- poison | budget | cancelled | ancestor_failed | sandbox | worker
     created_at      REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agents_task ON agents(task_id);
@@ -135,7 +136,6 @@ CREATE TABLE IF NOT EXISTS processes (
     id           TEXT PRIMARY KEY,
     task_id      TEXT NOT NULL REFERENCES tasks(id),
     agent_id     TEXT NOT NULL REFERENCES agents(id),
-    call_ref     TEXT NOT NULL UNIQUE,           -- "<agent_id>:<step_seq>:<call_id>" that made it
     argv_json    TEXT NOT NULL,                  -- the checked argv (argv[0] a bare name, found by PATH in env_json)
     env_json     TEXT NOT NULL,                  -- the full payload environment from the policy
     cwd          TEXT NOT NULL,                  -- run_command: the attempt's copy; process_start: own clone

@@ -130,11 +130,10 @@ def on_agent_terminal(tx: Tx, agent_id: str) -> None:
     4. Root: task `done` or `failed`; processes with lifetime `task`: stopped ('task_ended')."""
     agent = tx.require("SELECT * FROM agents WHERE id=?", agent_id)
     if agent["parent_id"]:
-        step, call_id = agent["parent_call"].split(":", 1)
         value = _agent_result(agent)
         result = dict(agent_id=agent_id, status=agent["state"],
                       result=agent["fail_reason"] if value is None else value)
-        calls.fill_call(tx, agent["parent_id"], int(step), call_id,
+        calls.fill_call(tx, agent["parent_id"], agent["parent_step_seq"], agent["parent_call_id"],
                         wire.CallResult(result=result, is_error=agent["state"] == "failed"))
     _stop_processes(tx, "agent_id", agent_id, "agent_ended", ("agent", "command"))
     if agent["state"] == "failed":
@@ -189,9 +188,9 @@ def memory(tx: Tx, agent_id: str) -> dict[str, str]:
 def _create_agent(tx: Tx, task_id: str, agent_id: str, spec: wire.TaskSpec, *,
                   parent: dict | None = None, call: wire.CallView | None = None) -> None:
     parent_id = parent["id"] if parent else None
-    tx.run("INSERT INTO agents(id, task_id, parent_id, parent_call, seed_agent_id, seed_attempt, depth, "
-           "kind, spec_json, state, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
-           agent_id, task_id, parent_id, f"{call.step_seq}:{call.call_id}" if call else None, parent_id,
+    tx.run("INSERT INTO agents(id, task_id, parent_id, parent_step_seq, parent_call_id, seed_agent_id, seed_attempt, depth, "
+           "kind, spec_json, state, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
+           agent_id, task_id, parent_id, call.step_seq if call else None, call.call_id if call else None, parent_id,
            parent["attempt"] if parent else None, parent["depth"] + 1 if parent else 0,
            spec.kind, spec.model_dump_json(), tx.now)
     tx.event(task_id, agent_id, "agent_created", parent_id=parent_id)

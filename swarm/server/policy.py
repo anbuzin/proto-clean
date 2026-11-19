@@ -1,13 +1,7 @@
-"""Command policy: which commands an agent can run, with what environment, and their class.
-
-The server asks the policy (a pure function) before it records a process, and stores the
-approved argv and environment on the row. A command with no file or network confinement
-can have effects outside its sandbox copy, so every program is `external` unless the
-owner's policy file marks it `local` (see "Limits" in ARCHITECTURE.md).
-"""
-
+"""Pure command allow-list policy and minimal payload environment."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -17,38 +11,47 @@ from swarm.wire import EffectClass
 
 @dataclass(frozen=True)
 class Decision:
-    """The server stores the checked input argv (argv[0] a bare name) and `env`; the shim
-    runs `os.execvpe(argv[0], argv, env)`, so PATH lookup uses the PATH in `env`."""
+    """Approved command class and complete payload environment."""
     allowed: bool
-    effect_class: EffectClass = "external"   # a cut `external` command blocks the agent (I16)
+    effect_class: EffectClass = "external"
     reason: str = ""
-    env: dict[str, str] = field(default_factory=dict)  # the full payload env; no token, no key
+    env: dict[str, str] = field(default_factory=dict)
 
 
 class CommandPolicy(Protocol):
     def check(self, argv: list[str], private_dir: Path) -> Decision:
-        """Decide for one command. Pure: no I/O. `private_dir` holds the payload's
-        HOME (`home/`) and TMPDIR (`tmp/`); the shim makes them."""
+        """Decide for one command without I/O."""
         ...
 
 
 @dataclass(frozen=True)
 class AllowList:
-    """Allow `argv[0]` if it is a bare program name in `programs`; the value is its class.
-    Env: `PATH`, `LANG=C.UTF-8`, `HOME`, `TMPDIR`."""
+    """Allow bare program names and supply a minimal environment."""
     programs: dict[str, EffectClass]
     path: str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
     def check(self, argv: list[str], private_dir: Path) -> Decision:
-        raise NotImplementedError
+        """Return a decision for a checked command."""
+        if not argv or not isinstance(argv[0], str) or not argv[0] or "/" in argv[0] or argv[0] in (".", "..") or argv[0] not in self.programs:
+            return Decision(False, reason="program is not allowed")
+        return Decision(True, self.programs[argv[0]], env={
+            "PATH": self.path, "LANG": "C.UTF-8", "HOME": str(private_dir / "home"),
+            "TMPDIR": str(private_dir / "tmp"),
+        })
 
 
 def default_policy() -> AllowList:
-    """`python3`, `sh`, `ls`, `cat`, `grep`, `git`, `make`, `pytest`, `sleep`, `echo`, `curl`,
-    all `external`. Everything else is refused."""
-    raise NotImplementedError
+    """Return the default allow-list; all programs are external."""
+    return AllowList({name: "external" for name in (
+        "python3", "sh", "ls", "cat", "grep", "git", "make", "pytest", "sleep", "echo", "curl")})
 
 
 def load_policy(path: Path) -> AllowList:
-    """`{"programs": {"name": "local" | "external"}}` from a JSON file (`--policy`)."""
-    raise NotImplementedError
+    """Load and validate a JSON program allow-list."""
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict) or set(data) != {"programs"} or not isinstance(data["programs"], dict):
+        raise ValueError("policy must contain a programs object")
+    programs = data["programs"]
+    if any(not isinstance(k, str) or not k or "/" in k or k in (".", "..") or v not in ("local", "external") for k, v in programs.items()):
+        raise ValueError("invalid policy program or effect class")
+    return AllowList(programs)

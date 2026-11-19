@@ -1,17 +1,36 @@
-"""Entry point: `python -m swarm.server --state DIR [--host 127.0.0.1] [--port N] [--policy FILE]`.
-
-Port rule (stable endpoint): `--port N` is used and saved in `DIR/server.json`; with no
-`--port`, the port saved in `server.json` is used again, else 8700. `--port 0` picks a
-free port once (tests) and saves it, so a restart on the same state directory listens
-on the same URL and every running worker, runner, and shim reaches it again.
-"""
-
+"""Run the server until SIGINT or SIGTERM."""
 from __future__ import annotations
+
+import argparse
+import signal
+import threading
+from pathlib import Path
+
+from .app import Server
+from .config import ServerConfig
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse arguments, build `ServerConfig`, run `app.Server` until SIGTERM or SIGINT."""
-    raise NotImplementedError
+    """Parse options, start the server, and stop it on a signal."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--state", required=True, type=Path)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--policy", type=Path)
+    args = parser.parse_args(argv)
+    server = Server(ServerConfig(state_dir=args.state, host=args.host, port=args.port, policy_path=args.policy))
+    stopped = threading.Event()
+    old_handlers = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        old_handlers[sig] = signal.signal(sig, lambda signum, frame: stopped.set())
+    try:
+        server.start()
+        stopped.wait()
+    finally:
+        server.stop()
+        for sig, old in old_handlers.items():
+            signal.signal(sig, old)
+    return 0
 
 
 if __name__ == "__main__":

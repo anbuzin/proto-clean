@@ -1,23 +1,22 @@
-"""Server assembly: lock, tokens, store, startup recovery, reaper thread, HTTP.
-
-Startup order (each step before the next):
-1. Exclusive `fcntl` lock on `state_dir/server.lock`; a second server exits.
-2. `tokens.json` (mode 0600, keys `owner`, `worker`, `runner`), made once.
-3. `store.initialize()`.
-4. `leases.recover_after_restart()`: end every open attempt `server_restart` (no strike).
-5. `processes.recover_after_restart()`: revoke `issued` launches; set heartbeat clocks.
-6. Start the reaper thread; listen on the port (section "Endpoint" of ARCHITECTURE.md);
-   write `server.json` = {url, port, pid}.
-"""
-
+"""Server assembly, startup recovery, and reaper lifecycle."""
 from __future__ import annotations
 
+import fcntl
+import json
+import logging
+import os
+import secrets
 import threading
+import time
+from dataclasses import replace
+from pathlib import Path
 
 from swarm import wire
-
-from .config import ServerConfig
-from .http import Deps
+from . import leases, processes
+from .config import DEFAULT_PORT, ServerConfig
+from .http import Deps, make_http_server
+from .policy import default_policy, load_policy
+from .store import Store
 
 
 class Server:
@@ -25,25 +24,87 @@ class Server:
         self.config = config
         self.deps: Deps
         self.url: str
-        raise NotImplementedError
+        self._lock = None
+        self._http = None
+        self._http_thread = None
+        self._reaper = None
+        self._stop = threading.Event()
 
     def start(self) -> None:
-        """Run the startup order. Returns when the server listens."""
-        raise NotImplementedError
+        """Recover state and start HTTP and reaper threads before returning."""
+        self.config.state_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = (self.config.state_dir / "server.lock").open("a+")
+        try:
+            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            token_path = self.config.tokens_path
+            if not token_path.exists():
+                tokens = {name: secrets.token_urlsafe(32) for name in ("owner", "worker", "runner")}
+                fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as file:
+                    json.dump(tokens, file)
+            tokens = json.loads(token_path.read_text())
+            if set(tokens) != {"owner", "worker", "runner"} or any(not isinstance(v, str) or not v for v in tokens.values()):
+                raise ValueError("invalid tokens.json")
+            port = self.config.port
+            server_path = self.config.state_dir / "server.json"
+            if port is None:
+                port = json.loads(server_path.read_text())["port"] if server_path.exists() else DEFAULT_PORT
+            self.config = replace(self.config, port=port)
+            store = Store(self.config.db_path)
+            store.initialize()
+            policy = load_policy(self.config.policy_path) if self.config.policy_path else default_policy()
+            self.deps = Deps(store, self.config, policy, tokens, time.time())
+            leases.recover_after_restart(self.deps)
+            processes.recover_after_restart(self.deps)
+            self._stop.clear()
+            self._reaper = threading.Thread(target=reaper_loop, args=(self.deps, self._stop), daemon=True)
+            self._reaper.start()
+            self._http = make_http_server(self.deps)
+            actual_port = self._http.server_address[1]
+            self.url = f"http://{self.config.host}:{actual_port}"
+            self._http_thread = threading.Thread(target=self._http.serve_forever, daemon=True)
+            self._http_thread.start()
+            temporary = server_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({"url": self.url, "port": actual_port, "pid": os.getpid()}))
+            temporary.replace(server_path)
+        except BaseException:
+            self.stop()
+            raise
 
     def serve_forever(self) -> None:
-        raise NotImplementedError
+        """Wait for the server to stop."""
+        self._stop.wait()
 
     def stop(self) -> None:
-        """Stop the reaper and HTTP; release the lock. Does not touch processes."""
-        raise NotImplementedError
+        """Stop the HTTP server and reaper, then release the lock."""
+        self._stop.set()
+        if self._http is not None:
+            if self._http_thread is not None:
+                self._http.shutdown()
+                self._http_thread.join()
+                self._http_thread = None
+            self._http.server_close()
+            self._http = None
+        if self._reaper is not None:
+            self._reaper.join()
+            self._reaper = None
+        if hasattr(self, "deps"):
+            self.deps.store.close()
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None
 
 
 def health(deps: Deps, request: None) -> wire.Health:
-    raise NotImplementedError
+    """Return server identity and startup time."""
+    return wire.Health(ok=True, pid=os.getpid(), started_at=deps.started_at)
 
 
 def reaper_loop(deps: Deps, stop: threading.Event) -> None:
-    """Every `reaper_interval_s`: `leases.expire_leases`, `processes.expire_launches`,
-    `processes.enforce_lifetimes`. Each in its own transactions; an error is logged."""
-    raise NotImplementedError
+    """Expire leases and launches and enforce lifetimes at each interval."""
+    while not stop.wait(deps.config.reaper_interval_s):
+        for reap in (leases.expire_leases, processes.expire_launches, processes.enforce_lifetimes):
+            try:
+                reap(deps)
+            except Exception:
+                logging.exception("reaper %s failed", reap.__name__)

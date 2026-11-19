@@ -120,3 +120,35 @@ class TaskTest(SwarmTest):
             self.assertEqual(child_call.outcome.result, {"agent_id": child.id, "status": "done", "result": child.result})
         copies = [a.sandbox_path for a in parent.attempts] + [a.attempts[0].sandbox_path for a in children.values()]
         self.assertEqual(len(set(copies)), 4)
+
+    def test_t9_replacement_copy_does_not_see_late_old_writes(self) -> None:
+        release = self.state / "release"
+        self.set_scripts({"copy": [[
+            call("write_file", "seed", path="note", content="before the crash"),
+            call("wait_for_release", "gate", path=str(release)),
+        ], "done"]})
+        self.start_server()
+        self.start_supervisor()
+        task = self.submit("copy", "write_file", "wait_for_release")
+        first = self.running_call(task, "gate").attempts[0]
+        old = Path(first.sandbox_path)
+        change = self.state / "change-old"
+        writer = self.launch("-c", """
+import sys, time
+from pathlib import Path
+trigger, destination = map(Path, sys.argv[1:])
+while not trigger.exists():
+    time.sleep(0.05)
+destination.write_text("late old write")
+""", str(change), str(old / "note"))
+        send(first.pid, signal.SIGKILL)
+        second = self.running_call(task, "gate", attempt=2).attempts[1]
+        new = Path(second.sandbox_path)
+        self.assertNotEqual(new, old)
+        self.assertIsNone(writer.poll())
+        change.touch()
+        self.assertEqual(writer.wait(timeout=5), 0)
+        self.assertEqual((old / "note").read_text(), "late old write")
+        self.assertEqual((new / "note").read_text(), "before the crash")
+        release.touch()
+        self.finished(task)
